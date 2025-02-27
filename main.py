@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-from services.transcribe_service import TranscribeService
+from domain.services.transcribe_service.transcribe_service import TranscribeService
 
 app = FastAPI()
 
