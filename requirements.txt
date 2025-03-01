@@ -2,3 +2,5 @@ fastapi
 uvicorn
 torch
 transformers
+python-multipart
+torchaudio
