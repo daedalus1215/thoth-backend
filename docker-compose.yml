@@ -2,6 +2,8 @@ version: '3.8'
 services:
   asr-service:
     build: .
+    image: nvidia/cuda:12.4.1-cudnn8-devel-ubuntu22.04
+    runtime: nvidia
     ports:
       - "8000:8000"
     deploy:
@@ -9,8 +11,9 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: ["gpu"]
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    runtime: nvidia
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
