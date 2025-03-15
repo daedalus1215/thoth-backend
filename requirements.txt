@@ -1,6 +1,8 @@
 fastapi
-uvicorn
-torch
-transformers
 python-multipart
+uvicorn[standard]
+websockets>=10.0
+transformers
+torch
+numpy
 torchaudio
