@@ -1,20 +1,23 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn8-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Install required system dependencies
-RUN apt update && apt install -y \
-    python3 python3-pip ffmpeg git \
-    portaudio19-dev && \
-    rm -rf /var/lib/apt/lists/*
+# Install Python and pip
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir websockets uvicorn[standard]  # Explicitly install websockets
 
-# Upgrade pip and install dependencies
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
+# Copy your application code
 COPY . .
 
+# Expose the port
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the FastAPI application with explicit websocket support
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets"]
