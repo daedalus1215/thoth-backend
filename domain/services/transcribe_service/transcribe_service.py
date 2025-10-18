@@ -4,8 +4,8 @@ from fastapi import UploadFile
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import torch
 
-processor = WhisperProcessor.from_pretrained("openai/whisper-base")
-model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-base") #.to("cuda")
+processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3") #.to("cuda")
 
 class TranscribeService:
 
