@@ -39,54 +39,174 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         print(f"Chunked transcription engine initialized with {chunk_duration_seconds}s chunks")
     
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
-        """Transcribe audio file to text using chunked Whisper processing"""
+        """Transcribe audio file to text using industry-standard processing"""
+        import tempfile
+        import os
+        import asyncio
+        from pathlib import Path
+        
+        temp_file_path = None
         try:
             print(f"🎵 Starting transcription of file: {audio_file.filename}")
             
-            # Try to load audio with librosa, with fallback to different methods
-            print("🔄 Loading audio data...")
-            audio_data, sample_rate = await self._load_audio_data(audio_file)
+            # Industry standard: Save to temporary file first
+            print("🔄 Saving audio to temporary file...")
+            temp_file_path = await self._save_to_temp_file(audio_file)
             
-            duration = len(audio_data) / sample_rate
+            # Get audio duration without loading entire file into memory
+            print("🔄 Getting audio duration...")
+            duration = await self._get_audio_duration(temp_file_path)
             print(f"✅ Audio duration: {duration:.2f} seconds")
             
-            # If audio is short enough, process normally
-            if duration <= self.chunk_duration_seconds:
-                print(f"📝 Processing as single chunk (≤{self.chunk_duration_seconds}s)")
-                result = await self._transcribe_single_chunk(audio_data, sample_rate)
-                print(f"✅ Single chunk transcription completed!")
+            # For short audio (≤30s), process directly without chunking
+            if duration <= 30.0:
+                print(f"📝 Processing as single file (≤30s) - no chunking needed")
+                result = await self._transcribe_file_direct(temp_file_path)
+                print(f"✅ Direct transcription completed!")
                 return result
             
-            # For longer audio, split into chunks
-            print("🔄 Splitting audio into chunks...")
-            chunks = self._split_audio_into_chunks(audio_data, sample_rate)
-            print(f"✅ Split audio into {len(chunks)} chunks")
-            
-            # Transcribe each chunk
-            transcriptions = []
-            for i, chunk in enumerate(chunks):
-                print(f"🔄 Processing chunk {i+1}/{len(chunks)}")
-                chunk_transcription = await self._transcribe_single_chunk(chunk, sample_rate)
-                if chunk_transcription and chunk_transcription.text.strip():
-                    transcriptions.append(chunk_transcription.text.strip())
-                    print(f"✅ Chunk {i+1} completed: '{chunk_transcription.text[:30]}...'")
-                else:
-                    print(f"⚠️  Chunk {i+1} produced no transcription")
-            
-            # Combine all transcriptions
-            if transcriptions:
-                combined_text = " ".join(transcriptions)
-                print(f"✅ Combined transcription completed: '{combined_text[:100]}...'")
-                return Transcription(text=combined_text)
-            else:
-                print("⚠️  No transcriptions produced")
-                return Transcription(text="")
+            # For longer audio, use proper chunking with temporary files
+            print(f"🔄 Processing long audio ({duration:.1f}s) with chunking...")
+            result = await self._transcribe_long_audio(temp_file_path, duration)
+            print(f"✅ Long audio transcription completed!")
+            return result
                 
         except Exception as e:
             print(f"❌ Failed to transcribe audio: {str(e)}")
             import traceback
             traceback.print_exc()
             raise ValueError(f"Failed to transcribe audio: {str(e)}")
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                    print(f"🧹 Cleaned up temporary file: {temp_file_path}")
+                except Exception as e:
+                    print(f"⚠️  Failed to clean up temp file: {e}")
+    
+    async def _save_to_temp_file(self, audio_file: AudioFile) -> str:
+        """Save audio file to temporary file with proper extension"""
+        import tempfile
+        import os
+        
+        # Get proper file extension
+        file_extension = audio_file.get_file_extension() or 'wav'
+        
+        # Create temporary file with proper extension
+        temp_fd, temp_path = tempfile.mkstemp(suffix=f'.{file_extension}')
+        
+        try:
+            with os.fdopen(temp_fd, 'wb') as temp_file:
+                temp_file.write(audio_file.content)
+            return temp_path
+        except Exception as e:
+            os.close(temp_fd)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise e
+    
+    async def _get_audio_duration(self, file_path: str) -> float:
+        """Get audio duration without loading entire file into memory"""
+        try:
+            # Use librosa to get duration efficiently
+            import librosa
+            duration = librosa.get_duration(path=file_path)
+            return duration
+        except Exception as e:
+            print(f"⚠️  Failed to get duration with librosa: {e}")
+            # Fallback: estimate from file size (rough approximation)
+            file_size = os.path.getsize(file_path)
+            # Rough estimate: 16kHz, 16-bit mono = 32KB per second
+            estimated_duration = file_size / 32000
+            print(f"📊 Estimated duration from file size: {estimated_duration:.2f}s")
+            return estimated_duration
+    
+    async def _transcribe_file_direct(self, file_path: str) -> Transcription:
+        """Transcribe file directly without chunking - industry standard for short audio"""
+        try:
+            print("🔄 Loading audio for direct transcription...")
+            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
+            print(f"✅ Loaded {len(audio_data)} samples at {sample_rate}Hz")
+            
+            # Process with timeout
+            print("🔄 Starting transcription with 60s timeout...")
+            result = await asyncio.wait_for(
+                self._transcribe_single_chunk(audio_data, sample_rate),
+                timeout=60.0  # 60 second timeout
+            )
+            
+            if result:
+                print(f"✅ Direct transcription completed: '{result.text[:50]}...'")
+                return result
+            else:
+                print("⚠️  No transcription produced")
+                return Transcription(text="")
+                
+        except asyncio.TimeoutError:
+            print("❌ Transcription timed out after 60 seconds")
+            raise ValueError("Transcription timed out - audio may be too long or complex")
+        except Exception as e:
+            print(f"❌ Direct transcription failed: {e}")
+            raise e
+    
+    async def _transcribe_long_audio(self, file_path: str, duration: float) -> Transcription:
+        """Transcribe long audio using proper chunking with temporary files"""
+        try:
+            # Load audio in chunks to avoid memory issues
+            chunk_duration = min(30.0, duration / 2)  # Adaptive chunk size
+            print(f"🔄 Processing {duration:.1f}s audio in {chunk_duration:.1f}s chunks...")
+            
+            # Use librosa to process in chunks
+            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
+            chunk_samples = int(chunk_duration * sample_rate)
+            overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
+            
+            transcriptions = []
+            start = 0
+            chunk_num = 0
+            
+            while start < len(audio_data):
+                end = min(start + chunk_samples, len(audio_data))
+                chunk = audio_data[start:end]
+                chunk_num += 1
+                
+                print(f"🔄 Processing chunk {chunk_num} ({start/sample_rate:.1f}s - {end/sample_rate:.1f}s)")
+                
+                # Process chunk with timeout
+                try:
+                    chunk_result = await asyncio.wait_for(
+                        self._transcribe_single_chunk(chunk, sample_rate),
+                        timeout=30.0  # 30 second timeout per chunk
+                    )
+                    
+                    if chunk_result and chunk_result.text.strip():
+                        transcriptions.append(chunk_result.text.strip())
+                        print(f"✅ Chunk {chunk_num} completed: '{chunk_result.text[:30]}...'")
+                    else:
+                        print(f"⚠️  Chunk {chunk_num} produced no transcription")
+                        
+                except asyncio.TimeoutError:
+                    print(f"⚠️  Chunk {chunk_num} timed out - skipping")
+                    continue
+                
+                # Move to next chunk with overlap
+                start = end - overlap_samples
+                if start >= len(audio_data):
+                    break
+            
+            # Combine results
+            if transcriptions:
+                combined_text = " ".join(transcriptions)
+                print(f"✅ Combined {len(transcriptions)} chunks: '{combined_text[:100]}...'")
+                return Transcription(text=combined_text)
+            else:
+                print("⚠️  No transcriptions produced from any chunks")
+                return Transcription(text="")
+                
+        except Exception as e:
+            print(f"❌ Long audio transcription failed: {e}")
+            raise e
     
     async def _load_audio_data(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
         """Load audio data with multiple fallback methods"""

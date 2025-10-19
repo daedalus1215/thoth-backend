@@ -32,12 +32,49 @@ class TranscriptionController:
         self.router.get("/performance")(self.get_performance_info)
     
     async def transcribe_file(self, file: UploadFile = File(...)):
-        """Transcribe uploaded audio file"""
+        """Transcribe uploaded audio file with progress tracking"""
         try:
+            print(f"📁 Received file upload: {file.filename} ({file.size} bytes)")
+            
+            # Validate file size (industry standard: max 100MB)
+            if file.size and file.size > 100 * 1024 * 1024:
+                return JSONResponse(
+                    content={"error": "File too large. Maximum size is 100MB."}, 
+                    status_code=413
+                )
+            
+            # Validate file type
+            if not file.content_type or not file.content_type.startswith('audio/'):
+                return JSONResponse(
+                    content={"error": "Invalid file type. Please upload an audio file."}, 
+                    status_code=400
+                )
+            
+            print(f"✅ File validation passed. Starting transcription...")
             audio_file = AudioFile.from_upload_file(file)
-            transcription = await self.transcribe_audio_use_case.execute(audio_file, self.audio_config)
-            return JSONResponse(content={"transcription": transcription.text})
+            
+            # Add timeout to prevent infinite hanging
+            import asyncio
+            transcription = await asyncio.wait_for(
+                self.transcribe_audio_use_case.execute(audio_file, self.audio_config),
+                timeout=300.0  # 5 minute timeout
+            )
+            
+            print(f"✅ Transcription completed successfully")
+            return JSONResponse(content={
+                "transcription": transcription.text,
+                "status": "success",
+                "filename": file.filename
+            })
+            
+        except asyncio.TimeoutError:
+            print(f"❌ Transcription timed out after 5 minutes")
+            return JSONResponse(
+                content={"error": "Transcription timed out. Please try with a shorter audio file."}, 
+                status_code=408
+            )
         except Exception as e:
+            print(f"❌ Transcription failed: {str(e)}")
             return JSONResponse(content={"error": str(e)}, status_code=400)
     
     async def upload_audio(self, file: UploadFile = File(...)):
