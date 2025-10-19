@@ -11,13 +11,20 @@ from typing import Optional
 class WhisperTranscriptionEngine(TranscriptionEngine):
     """Infrastructure adapter for transcription using Whisper"""
     
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, model_config: ModelConfig, device: str = None):
         self.model_config = model_config
         self.processor = WhisperProcessor.from_pretrained(model_config.model_name)
         self.model = WhisperForConditionalGeneration.from_pretrained(model_config.model_name)
         
-        if torch.cuda.is_available():
+        # Use specified device or auto-detect
+        if device:
+            self.model = self.model.to(device)
+            print(f"Using specified device: {device}")
+        elif torch.cuda.is_available():
             self.model = self.model.to("cuda")
+            print("Using CUDA device")
+        else:
+            print("Using CPU device")
     
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
         """Transcribe audio file to text using Whisper"""
@@ -32,8 +39,8 @@ class WhisperTranscriptionEngine(TranscriptionEngine):
                 return_tensors="pt"
             ).input_features
             
-            if torch.cuda.is_available():
-                input_features = input_features.to("cuda")
+            # Move input features to the same device as the model
+            input_features = input_features.to(self.model.device)
             
             # Generate transcription
             predicted_ids = self.model.generate(
@@ -68,8 +75,8 @@ class WhisperTranscriptionEngine(TranscriptionEngine):
                 return_tensors="pt"
             ).input_features
             
-            if torch.cuda.is_available():
-                input_features = input_features.to("cuda")
+            # Move input features to the same device as the model
+            input_features = input_features.to(self.model.device)
             
             # Generate transcription
             predicted_ids = self.model.generate(

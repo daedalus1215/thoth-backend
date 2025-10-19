@@ -13,6 +13,7 @@ from infra.adapters.audio.librosa_audio_processor import LibrosaAudioProcessor
 from infra.adapters.transcription.whisper_transcription_engine import WhisperTranscriptionEngine
 from infra.adapters.transcription.accelerated_whisper_transcription_engine import AcceleratedWhisperTranscriptionEngine
 from infra.adapters.transcription.batch_transcription_engine import BatchTranscriptionEngine
+from infra.adapters.transcription.chunked_whisper_transcription_engine import ChunkedWhisperTranscriptionEngine
 from infra.adapters.audio.in_memory_audio_buffer import InMemoryAudioBuffer
 from infra.adapters.repositories.in_memory_transcription_repository import InMemoryTranscriptionRepository
 from infra.adapters.repositories.in_memory_transcription_repository import ConsoleNotificationService
@@ -60,14 +61,26 @@ class DependencyContainer:
         
         # Transcription engine configuration
         self._transcription_engine_config = TranscriptionEngineConfig(
-            engine_type="accelerated",
+            engine_type="chunked",  # Use chunked engine for long audio files
             batch_size=4,
             enable_mixed_precision=True,
             use_cache=True
         )
         
         # Choose transcription engine based on configuration
-        if self._transcription_engine_config.is_accelerated():
+        # Use CPU to avoid CUDA memory issues with multiple models
+        if self._transcription_engine_config.engine_type == "chunked":
+            try:
+                self._transcription_engine = ChunkedWhisperTranscriptionEngine(
+                    self._model_config, 
+                    chunk_duration_seconds=30.0
+                )
+                print("Using Chunked Whisper Transcription Engine (30s chunks)")
+            except Exception as e:
+                print(f"Chunked engine failed to initialize: {e}")
+                print("Falling back to CPU Whisper Transcription Engine")
+                self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
+        elif self._transcription_engine_config.is_accelerated():
             self._transcription_engine = AcceleratedWhisperTranscriptionEngine(self._model_config)
             print("Using Accelerated Whisper Transcription Engine")
         elif self._transcription_engine_config.is_batch():
@@ -77,8 +90,13 @@ class DependencyContainer:
             )
             print(f"Using Batch Transcription Engine (batch_size={self._transcription_engine_config.batch_size})")
         else:
-            self._transcription_engine = WhisperTranscriptionEngine(self._model_config)
-            print("Using Standard Whisper Transcription Engine")
+            self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
+            print("Using CPU Whisper Transcription Engine")
+        
+        # Create a separate streaming engine optimized for real-time audio
+        # Use CPU for streaming to avoid CUDA memory issues with dual models
+        self._streaming_transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
+        print("Using CPU Whisper Transcription Engine for streaming (to avoid CUDA memory issues)")
         
         self._audio_buffer = InMemoryAudioBuffer(self._audio_config)
         self._transcription_repository = InMemoryTranscriptionRepository()
@@ -92,7 +110,7 @@ class DependencyContainer:
         
         self._streaming_transcription_domain_service = StreamingTranscriptionDomainService(
             self._audio_buffer,
-            self._transcription_engine
+            self._streaming_transcription_engine
         )
         
         # Use cases
