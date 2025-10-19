@@ -138,23 +138,45 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print("🔄 Loading long audio from bytes...")
             audio_data, sample_rate = await self._load_audio_from_bytes(audio_file)
             
-            # Calculate chunk parameters
-            chunk_duration = min(30.0, duration / 2)  # Adaptive chunk size
+            # Calculate chunk parameters - optimize for long audio
+            if duration > 300:  # > 5 minutes
+                chunk_duration = min(60.0, duration / 4)  # Larger chunks for long audio
+            else:
+                chunk_duration = min(30.0, duration / 2)  # Smaller chunks for short audio
             print(f"🔄 Processing {duration:.1f}s audio in {chunk_duration:.1f}s chunks...")
+            print(f"📊 Audio data: {len(audio_data)} samples at {sample_rate}Hz")
+            print(f"📊 Expected duration: {len(audio_data) / sample_rate:.1f}s")
             
             chunk_samples = int(chunk_duration * sample_rate)
             overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
+            
+            print(f"📊 Chunk samples: {chunk_samples}")
+            print(f"📊 Overlap samples: {overlap_samples}")
+            print(f"📊 Step size: {chunk_samples - overlap_samples}")
             
             transcriptions = []
             start = 0
             chunk_num = 0
             
+            # Safety check: prevent infinite loops
+            max_expected_chunks = int(duration / chunk_duration) + 10  # Add buffer
+            print(f"🛡️  Safety check: Max expected chunks = {max_expected_chunks}")
+            
             while start < len(audio_data):
+                # Safety check: prevent infinite loops
+                if chunk_num > max_expected_chunks:
+                    print(f"❌ SAFETY BREAK: Too many chunks ({chunk_num} > {max_expected_chunks})")
+                    print(f"   Audio duration: {duration:.1f}s")
+                    print(f"   Chunk duration: {chunk_duration:.1f}s")
+                    print(f"   Audio data length: {len(audio_data)} samples")
+                    print(f"   Sample rate: {sample_rate}Hz")
+                    raise ValueError(f"Too many chunks generated ({chunk_num}). Audio file may be corrupted.")
+                
                 end = min(start + chunk_samples, len(audio_data))
                 chunk = audio_data[start:end]
                 chunk_num += 1
                 
-                print(f"🔄 Processing chunk {chunk_num} ({start/sample_rate:.1f}s - {end/sample_rate:.1f}s)")
+                print(f"🔄 Processing chunk {chunk_num}/{max_expected_chunks} ({start/sample_rate:.1f}s - {end/sample_rate:.1f}s)")
                 
                 # Process chunk with timeout
                 try:
@@ -174,8 +196,20 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     continue
                 
                 # Move to next chunk with overlap
+                old_start = start
                 start = end - overlap_samples
+                
+                print(f"📊 Chunk {chunk_num} progress: {old_start/sample_rate:.1f}s → {start/sample_rate:.1f}s (step: {(start-old_start)/sample_rate:.1f}s)")
+                
+                # Safety check: ensure we're actually advancing
+                if start <= old_start:
+                    print(f"❌ CHUNKING ERROR: Not advancing! start={start}, old_start={old_start}")
+                    print(f"   end={end}, overlap_samples={overlap_samples}")
+                    print(f"   chunk_samples={chunk_samples}")
+                    raise ValueError("Chunking logic error: not advancing through audio")
+                
                 if start >= len(audio_data):
+                    print(f"✅ Reached end of audio at sample {len(audio_data)}")
                     break
             
             # Combine results
