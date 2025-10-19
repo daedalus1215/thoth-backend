@@ -24,8 +24,8 @@ transcribe_service = TranscribeService(adjust_sample_rate_script, transcribe_scr
 
 config = StreamingConfig(
     sample_rate=16000,
-    buffer_duration_seconds=2.0,  # Buffer 2 seconds of audio
-    model_name="openai/whisper-base",
+    buffer_duration_seconds=3.0,  # Buffer 3 seconds of audio for better quality
+    model_name="openai/whisper-large-v3",
     chunk_overlap=0.1
 )
 streaming_transcribe_service = StreamingTranscribeService(config)
