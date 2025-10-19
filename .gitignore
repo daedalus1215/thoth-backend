@@ -9,3 +9,4 @@ venv/*
 **/*.pyz
 **/*.pywz
 **/*.pyzw
+.env.local*

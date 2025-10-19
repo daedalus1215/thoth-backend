@@ -5,7 +5,7 @@ from typing import Literal
 @dataclass(frozen=True)
 class TranscriptionEngineConfig:
     """Configuration for transcription engine selection"""
-    engine_type: Literal["standard", "accelerated", "batch", "chunked"] = "chunked"
+    engine_type: Literal["standard", "accelerated", "batch", "chunked", "sequential"] = "sequential"
     batch_size: int = 4
     chunk_duration_seconds: float = 30.0
     enable_mixed_precision: bool = True
@@ -26,3 +26,7 @@ class TranscriptionEngineConfig:
     def is_standard(self) -> bool:
         """Check if using standard engine"""
         return self.engine_type == "standard"
+    
+    def is_sequential(self) -> bool:
+        """Check if using sequential engine"""
+        return self.engine_type == "sequential"
