@@ -49,23 +49,21 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         try:
             print(f"🎵 Starting transcription of file: {audio_file.filename}")
             
-            # Industry standard: Save to temporary file first
-            print("🔄 Saving audio to temporary file...")
-            temp_file_path = await self._save_to_temp_file(audio_file)
-            
-            # Get audio duration without loading entire file into memory
+            # Get duration first using the original method (more reliable)
             print("🔄 Getting audio duration...")
-            duration = await self._get_audio_duration(temp_file_path)
+            duration = await self._get_audio_duration_from_bytes(audio_file)
             print(f"✅ Audio duration: {duration:.2f} seconds")
             
-            # For short audio (≤30s), process directly without chunking
+            # For short audio (≤30s), process directly without temporary files
             if duration <= 30.0:
-                print(f"📝 Processing as single file (≤30s) - no chunking needed")
-                result = await self._transcribe_file_direct(temp_file_path)
+                print(f"📝 Processing as single chunk (≤30s) - no chunking needed")
+                result = await self._transcribe_short_audio_direct(audio_file)
                 print(f"✅ Direct transcription completed!")
                 return result
             
-            # For longer audio, use proper chunking with temporary files
+            # For longer audio, use temporary file approach
+            print("🔄 Saving audio to temporary file for long audio processing...")
+            temp_file_path = await self._save_to_temp_file(audio_file)
             print(f"🔄 Processing long audio ({duration:.1f}s) with chunking...")
             result = await self._transcribe_long_audio(temp_file_path, duration)
             print(f"✅ Long audio transcription completed!")
@@ -85,20 +83,82 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 except Exception as e:
                     print(f"⚠️  Failed to clean up temp file: {e}")
     
+    async def _get_audio_duration_from_bytes(self, audio_file: AudioFile) -> float:
+        """Get audio duration from bytes without saving to file"""
+        try:
+            # Try to load audio directly from bytes
+            import librosa
+            import io
+            
+            print("🔄 Loading audio from bytes to get duration...")
+            audio_data, sample_rate = librosa.load(
+                io.BytesIO(audio_file.content),
+                sr=16000,
+                mono=True
+            )
+            duration = len(audio_data) / sample_rate
+            print(f"✅ Duration calculated: {duration:.2f}s from {len(audio_data)} samples")
+            return duration
+            
+        except Exception as e:
+            print(f"⚠️  Failed to get duration from bytes: {e}")
+            # Fallback: estimate from file size
+            file_size = len(audio_file.content)
+            # Rough estimate: 16kHz, 16-bit mono = 32KB per second
+            estimated_duration = file_size / 32000
+            print(f"📊 Estimated duration from file size: {estimated_duration:.2f}s")
+            return estimated_duration
+    
+    async def _transcribe_short_audio_direct(self, audio_file: AudioFile) -> Transcription:
+        """Transcribe short audio directly from bytes without temporary files"""
+        try:
+            print("🔄 Loading audio for direct transcription...")
+            import librosa
+            import io
+            
+            audio_data, sample_rate = librosa.load(
+                io.BytesIO(audio_file.content),
+                sr=16000,
+                mono=True
+            )
+            print(f"✅ Loaded {len(audio_data)} samples at {sample_rate}Hz")
+            
+            # Process with timeout
+            print("🔄 Starting transcription with 60s timeout...")
+            result = await asyncio.wait_for(
+                self._transcribe_single_chunk(audio_data, sample_rate),
+                timeout=60.0  # 60 second timeout
+            )
+            
+            if result:
+                print(f"✅ Direct transcription completed: '{result.text[:50]}...'")
+                return result
+            else:
+                print("⚠️  No transcription produced")
+                return Transcription(text="")
+                
+        except asyncio.TimeoutError:
+            print("❌ Transcription timed out after 60 seconds")
+            raise ValueError("Transcription timed out - audio may be too long or complex")
+        except Exception as e:
+            print(f"❌ Direct transcription failed: {e}")
+            raise e
+    
     async def _save_to_temp_file(self, audio_file: AudioFile) -> str:
         """Save audio file to temporary file with proper extension"""
         import tempfile
         import os
         
-        # Get proper file extension
-        file_extension = audio_file.get_file_extension() or 'wav'
+        # Get proper file extension - always use .wav for better compatibility
+        file_extension = 'wav'
         
-        # Create temporary file with proper extension
+        # Create temporary file with .wav extension for better audio library support
         temp_fd, temp_path = tempfile.mkstemp(suffix=f'.{file_extension}')
         
         try:
             with os.fdopen(temp_fd, 'wb') as temp_file:
                 temp_file.write(audio_file.content)
+            print(f"✅ Saved audio to temporary file: {temp_path}")
             return temp_path
         except Exception as e:
             os.close(temp_fd)
@@ -108,6 +168,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     
     async def _get_audio_duration(self, file_path: str) -> float:
         """Get audio duration without loading entire file into memory"""
+        import os
         try:
             # Use librosa to get duration efficiently
             import librosa
