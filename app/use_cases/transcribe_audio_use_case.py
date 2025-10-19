@@ -14,6 +14,7 @@ class TranscribeAudioUseCase(ABC):
         pass
 
 
+#TODO: Probably belongs to it's own class file.
 class StreamAudioUseCase(ABC):
     """Use case for streaming audio transcription"""
     
