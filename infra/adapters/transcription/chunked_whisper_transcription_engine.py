@@ -40,12 +40,8 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
         """Transcribe audio file to text using industry-standard processing"""
-        import tempfile
-        import os
         import asyncio
-        from pathlib import Path
         
-        temp_file_path = None
         try:
             print(f"🎵 Starting transcription of file: {audio_file.filename}")
             
@@ -54,18 +50,16 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             duration = await self._get_audio_duration_from_bytes(audio_file)
             print(f"✅ Audio duration: {duration:.2f} seconds")
             
-            # For short audio (≤30s), process directly without temporary files
-            if duration <= 30.0:
-                print(f"📝 Processing as single chunk (≤30s) - no chunking needed")
+            # For short audio (≤60s), process directly without temporary files
+            if duration <= 60.0:
+                print(f"📝 Processing as single chunk (≤60s) - no chunking needed")
                 result = await self._transcribe_short_audio_direct(audio_file)
                 print(f"✅ Direct transcription completed!")
                 return result
             
-            # For longer audio, use temporary file approach
-            print("🔄 Saving audio to temporary file for long audio processing...")
-            temp_file_path = await self._save_to_temp_file(audio_file)
-            print(f"🔄 Processing long audio ({duration:.1f}s) with chunking...")
-            result = await self._transcribe_long_audio(temp_file_path, duration)
+            # For longer audio, use chunking but still process from bytes
+            print(f"🔄 Processing long audio ({duration:.1f}s) with chunking from bytes...")
+            result = await self._transcribe_long_audio_from_bytes(audio_file, duration)
             print(f"✅ Long audio transcription completed!")
             return result
                 
@@ -74,14 +68,6 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             import traceback
             traceback.print_exc()
             raise ValueError(f"Failed to transcribe audio: {str(e)}")
-        finally:
-            # Clean up temporary file
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.unlink(temp_file_path)
-                    print(f"🧹 Cleaned up temporary file: {temp_file_path}")
-                except Exception as e:
-                    print(f"⚠️  Failed to clean up temp file: {e}")
     
     async def _get_audio_duration_from_bytes(self, audio_file: AudioFile) -> float:
         """Get audio duration from bytes without saving to file"""
@@ -144,82 +130,18 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"❌ Direct transcription failed: {e}")
             raise e
     
-    async def _save_to_temp_file(self, audio_file: AudioFile) -> str:
-        """Save audio file to temporary file with proper extension"""
-        import tempfile
-        import os
-        
-        # Get proper file extension based on content type
-        file_extension = audio_file.get_file_extension() or 'wav'
-        
-        # Create temporary file with proper extension
-        temp_fd, temp_path = tempfile.mkstemp(suffix=f'.{file_extension}')
-        
-        try:
-            with os.fdopen(temp_fd, 'wb') as temp_file:
-                temp_file.write(audio_file.content)
-            print(f"✅ Saved audio to temporary file: {temp_path} (extension: {file_extension})")
-            return temp_path
-        except Exception as e:
-            os.close(temp_fd)
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise e
     
-    async def _get_audio_duration(self, file_path: str) -> float:
-        """Get audio duration without loading entire file into memory"""
-        import os
+    async def _transcribe_long_audio_from_bytes(self, audio_file: AudioFile, duration: float) -> Transcription:
+        """Transcribe long audio using chunking directly from bytes"""
         try:
-            # Use librosa to get duration efficiently
-            import librosa
-            duration = librosa.get_duration(path=file_path)
-            return duration
-        except Exception as e:
-            print(f"⚠️  Failed to get duration with librosa: {e}")
-            # Fallback: estimate from file size (rough approximation)
-            file_size = os.path.getsize(file_path)
-            # Rough estimate: 16kHz, 16-bit mono = 32KB per second
-            estimated_duration = file_size / 32000
-            print(f"📊 Estimated duration from file size: {estimated_duration:.2f}s")
-            return estimated_duration
-    
-    async def _transcribe_file_direct(self, file_path: str) -> Transcription:
-        """Transcribe file directly without chunking - industry standard for short audio"""
-        try:
-            print("🔄 Loading audio for direct transcription...")
-            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
-            print(f"✅ Loaded {len(audio_data)} samples at {sample_rate}Hz")
+            # Load audio data from bytes
+            print("🔄 Loading long audio from bytes...")
+            audio_data, sample_rate = await self._load_audio_from_bytes(audio_file)
             
-            # Process with timeout
-            print("🔄 Starting transcription with 60s timeout...")
-            result = await asyncio.wait_for(
-                self._transcribe_single_chunk(audio_data, sample_rate),
-                timeout=60.0  # 60 second timeout
-            )
-            
-            if result:
-                print(f"✅ Direct transcription completed: '{result.text[:50]}...'")
-                return result
-            else:
-                print("⚠️  No transcription produced")
-                return Transcription(text="")
-                
-        except asyncio.TimeoutError:
-            print("❌ Transcription timed out after 60 seconds")
-            raise ValueError("Transcription timed out - audio may be too long or complex")
-        except Exception as e:
-            print(f"❌ Direct transcription failed: {e}")
-            raise e
-    
-    async def _transcribe_long_audio(self, file_path: str, duration: float) -> Transcription:
-        """Transcribe long audio using proper chunking with temporary files"""
-        try:
-            # Load audio in chunks to avoid memory issues
+            # Calculate chunk parameters
             chunk_duration = min(30.0, duration / 2)  # Adaptive chunk size
             print(f"🔄 Processing {duration:.1f}s audio in {chunk_duration:.1f}s chunks...")
             
-            # Try to load audio with multiple fallback methods
-            audio_data, sample_rate = await self._load_audio_from_file(file_path)
             chunk_samples = int(chunk_duration * sample_rate)
             overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
             
@@ -269,24 +191,33 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"❌ Long audio transcription failed: {e}")
             raise e
     
-    async def _load_audio_from_file(self, file_path: str) -> tuple[np.ndarray, int]:
-        """Load audio from file with multiple fallback methods"""
+    async def _load_audio_from_bytes(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
+        """Load audio from bytes with multiple fallback methods"""
         try:
-            # Method 1: Try librosa with file path
-            print("🔄 Method 1: Loading with librosa from file path...")
-            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
+            # Method 1: Try librosa with BytesIO
+            print("🔄 Method 1: Loading with librosa from bytes...")
+            import librosa
+            import io
+            
+            audio_data, sample_rate = librosa.load(
+                io.BytesIO(audio_file.content),
+                sr=16000,
+                mono=True
+            )
             print(f"✅ Method 1 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
             return audio_data, sample_rate
+            
         except Exception as e1:
             print(f"❌ Method 1 failed: {e1}")
             
             try:
-                # Method 2: Try with different audio backends
-                print("🔄 Method 2: Trying with different audio backends...")
+                # Method 2: Try with soundfile
+                print("🔄 Method 2: Trying with soundfile...")
                 import soundfile as sf
+                import io
                 
-                # Read with soundfile first
-                audio_data, sample_rate = sf.read(file_path)
+                # Read with soundfile from bytes
+                audio_data, sample_rate = sf.read(io.BytesIO(audio_file.content))
                 
                 # Convert to mono if stereo
                 if len(audio_data.shape) > 1:
@@ -294,6 +225,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 
                 # Resample to 16kHz if needed
                 if sample_rate != 16000:
+                    import librosa
                     audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
                     sample_rate = 16000
                 
@@ -304,12 +236,18 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 print(f"❌ Method 2 failed: {e2}")
                 
                 try:
-                    # Method 3: Try with pydub
+                    # Method 3: Try with pydub (optional dependency)
                     print("🔄 Method 3: Trying with pydub...")
-                    from pydub import AudioSegment
+                    try:
+                        from pydub import AudioSegment
+                    except ImportError:
+                        print("❌ Pydub not available, skipping method 3")
+                        raise ImportError("Pydub not installed")
                     
-                    # Load with pydub
-                    audio = AudioSegment.from_file(file_path)
+                    import io
+                    
+                    # Load with pydub from bytes
+                    audio = AudioSegment.from_file(io.BytesIO(audio_file.content))
                     
                     # Convert to mono and 16kHz
                     audio = audio.set_channels(1).set_frame_rate(16000)
@@ -324,110 +262,9 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     
                 except Exception as e3:
                     print(f"❌ Method 3 failed: {e3}")
-                    raise ValueError(f"All audio loading methods failed for file: {file_path}")
+                    raise ValueError(f"All audio loading methods failed for file: {audio_file.filename}")
     
-    async def _load_audio_data(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
-        """Load audio data with multiple fallback methods"""
-        print(f"Loading audio file: {audio_file.filename}, size: {len(audio_file.content)} bytes, type: {audio_file.content_type}")
-        
-        try:
-            # Method 1: Try librosa with BytesIO
-            print("Method 1: Trying librosa with BytesIO...")
-            audio_data, sample_rate = librosa.load(
-                io.BytesIO(audio_file.content),
-                sr=16000,
-                mono=True
-            )
-            print(f"✅ Method 1 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
-            return audio_data, sample_rate
-        except Exception as e1:
-            print(f"❌ Method 1 failed: {e1}")
-            
-            try:
-                # Method 2: Try librosa with file extension hint
-                print("Method 2: Trying librosa with temporary file...")
-                import tempfile
-                import os
-                
-                # Create temporary file with proper extension
-                file_extension = audio_file.get_file_extension()
-                if not file_extension:
-                    file_extension = 'wav'  # Default fallback
-                
-                print(f"Using file extension: {file_extension}")
-                
-                with tempfile.NamedTemporaryFile(suffix=f'.{file_extension}', delete=False) as temp_file:
-                    temp_file.write(audio_file.content)
-                    temp_file_path = temp_file.name
-                
-                try:
-                    audio_data, sample_rate = librosa.load(
-                        temp_file_path,
-                        sr=16000,
-                        mono=True
-                    )
-                    print(f"✅ Method 2 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
-                    return audio_data, sample_rate
-                finally:
-                    # Clean up temporary file
-                    os.unlink(temp_file_path)
-                    
-            except Exception as e2:
-                print(f"❌ Method 2 failed: {e2}")
-                
-                try:
-                    # Method 3: Try soundfile directly
-                    print("Method 3: Trying soundfile...")
-                    import soundfile as sf
-                    
-                    with io.BytesIO(audio_file.content) as audio_buffer:
-                        audio_data, sample_rate = sf.read(audio_buffer)
-                        
-                        # Convert to mono if stereo
-                        if len(audio_data.shape) > 1:
-                            audio_data = np.mean(audio_data, axis=1)
-                        
-                        # Resample to 16kHz if needed
-                        if sample_rate != 16000:
-                            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
-                            sample_rate = 16000
-                        
-                        print(f"✅ Method 3 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
-                        return audio_data, sample_rate
-                        
-                except Exception as e3:
-                    print(f"❌ Method 3 failed: {e3}")
-                    
-                    # Method 4: Fallback to raw bytes interpretation
-                    print("Method 4: Using fallback raw bytes method...")
-                    try:
-                        audio_data = np.frombuffer(audio_file.content, dtype=np.int16).astype(np.float32) / 32767.0
-                        sample_rate = 16000  # Assume 16kHz
-                        print(f"✅ Method 4 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
-                        return audio_data, sample_rate
-                    except Exception as e4:
-                        print(f"❌ Method 4 failed: {e4}")
-                        raise ValueError(f"All audio loading methods failed. File: {audio_file.filename}, Size: {len(audio_file.content)} bytes, Type: {audio_file.content_type}")
     
-    def _split_audio_into_chunks(self, audio_data: np.ndarray, sample_rate: int) -> List[np.ndarray]:
-        """Split audio into overlapping chunks"""
-        chunk_samples = int(self.chunk_duration_seconds * sample_rate)
-        overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
-        
-        chunks = []
-        start = 0
-        
-        while start < len(audio_data):
-            end = min(start + chunk_samples, len(audio_data))
-            chunk = audio_data[start:end]
-            chunks.append(chunk)
-            
-            # Move start position with overlap
-            start = end - overlap_samples
-            if start >= len(audio_data):
-                break
-        
-        return chunks
     
     async def _transcribe_single_chunk(self, audio_data: np.ndarray, sample_rate: int) -> Optional[Transcription]:
         """Transcribe a single audio chunk"""
