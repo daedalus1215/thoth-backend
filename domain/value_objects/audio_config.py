@@ -24,7 +24,7 @@ class AudioConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     """Value object representing AI model configuration"""
-    model_name: str = "openai/whisper-large-v3"
+    model_name: str = "openai/whisper-medium"
     max_length: int = 448
     num_beams: int = 1
     do_sample: bool = False

@@ -36,7 +36,7 @@ class CORSConfig:
 @dataclass
 class ModelConfig:
     """Model configuration"""
-    model_name: str = "openai/whisper-large-v3"
+    model_name: str = "openai/whisper-medium"
     max_length: int = 448
     num_beams: int = 1
     do_sample: bool = False
@@ -102,7 +102,7 @@ class Config:
     def _load_model_config(self) -> ModelConfig:
         """Load model configuration from environment variables"""
         return ModelConfig(
-            model_name=os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3"),
+            model_name=os.getenv("WHISPER_MODEL_NAME", "openai/whisper-medium"),
             max_length=int(os.getenv("WHISPER_MAX_LENGTH", "448")),
             num_beams=int(os.getenv("WHISPER_NUM_BEAMS", "1")),
             do_sample=os.getenv("WHISPER_DO_SAMPLE", "false").lower() == "true",
