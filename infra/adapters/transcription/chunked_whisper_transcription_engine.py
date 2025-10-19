@@ -149,16 +149,16 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         import tempfile
         import os
         
-        # Get proper file extension - always use .wav for better compatibility
-        file_extension = 'wav'
+        # Get proper file extension based on content type
+        file_extension = audio_file.get_file_extension() or 'wav'
         
-        # Create temporary file with .wav extension for better audio library support
+        # Create temporary file with proper extension
         temp_fd, temp_path = tempfile.mkstemp(suffix=f'.{file_extension}')
         
         try:
             with os.fdopen(temp_fd, 'wb') as temp_file:
                 temp_file.write(audio_file.content)
-            print(f"✅ Saved audio to temporary file: {temp_path}")
+            print(f"✅ Saved audio to temporary file: {temp_path} (extension: {file_extension})")
             return temp_path
         except Exception as e:
             os.close(temp_fd)
@@ -218,8 +218,8 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             chunk_duration = min(30.0, duration / 2)  # Adaptive chunk size
             print(f"🔄 Processing {duration:.1f}s audio in {chunk_duration:.1f}s chunks...")
             
-            # Use librosa to process in chunks
-            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
+            # Try to load audio with multiple fallback methods
+            audio_data, sample_rate = await self._load_audio_from_file(file_path)
             chunk_samples = int(chunk_duration * sample_rate)
             overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
             
@@ -268,6 +268,63 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         except Exception as e:
             print(f"❌ Long audio transcription failed: {e}")
             raise e
+    
+    async def _load_audio_from_file(self, file_path: str) -> tuple[np.ndarray, int]:
+        """Load audio from file with multiple fallback methods"""
+        try:
+            # Method 1: Try librosa with file path
+            print("🔄 Method 1: Loading with librosa from file path...")
+            audio_data, sample_rate = librosa.load(file_path, sr=16000, mono=True)
+            print(f"✅ Method 1 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
+            return audio_data, sample_rate
+        except Exception as e1:
+            print(f"❌ Method 1 failed: {e1}")
+            
+            try:
+                # Method 2: Try with different audio backends
+                print("🔄 Method 2: Trying with different audio backends...")
+                import soundfile as sf
+                
+                # Read with soundfile first
+                audio_data, sample_rate = sf.read(file_path)
+                
+                # Convert to mono if stereo
+                if len(audio_data.shape) > 1:
+                    audio_data = np.mean(audio_data, axis=1)
+                
+                # Resample to 16kHz if needed
+                if sample_rate != 16000:
+                    audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+                    sample_rate = 16000
+                
+                print(f"✅ Method 2 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
+                return audio_data, sample_rate
+                
+            except Exception as e2:
+                print(f"❌ Method 2 failed: {e2}")
+                
+                try:
+                    # Method 3: Try with pydub
+                    print("🔄 Method 3: Trying with pydub...")
+                    from pydub import AudioSegment
+                    
+                    # Load with pydub
+                    audio = AudioSegment.from_file(file_path)
+                    
+                    # Convert to mono and 16kHz
+                    audio = audio.set_channels(1).set_frame_rate(16000)
+                    
+                    # Convert to numpy array
+                    audio_data = np.array(audio.get_array_of_samples(), dtype=np.float32)
+                    audio_data = audio_data / 32768.0  # Normalize to [-1, 1]
+                    sample_rate = 16000
+                    
+                    print(f"✅ Method 3 succeeded: {len(audio_data)} samples at {sample_rate}Hz")
+                    return audio_data, sample_rate
+                    
+                except Exception as e3:
+                    print(f"❌ Method 3 failed: {e3}")
+                    raise ValueError(f"All audio loading methods failed for file: {file_path}")
     
     async def _load_audio_data(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
         """Load audio data with multiple fallback methods"""
