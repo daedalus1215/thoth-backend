@@ -331,3 +331,4 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             "chunk_duration": self.chunk_duration_seconds,
             "engine_type": "sequential"
         }
+
