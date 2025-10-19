@@ -41,36 +41,51 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
         """Transcribe audio file to text using chunked Whisper processing"""
         try:
+            print(f"🎵 Starting transcription of file: {audio_file.filename}")
+            
             # Try to load audio with librosa, with fallback to different methods
+            print("🔄 Loading audio data...")
             audio_data, sample_rate = await self._load_audio_data(audio_file)
             
             duration = len(audio_data) / sample_rate
-            print(f"Audio duration: {duration:.2f} seconds")
+            print(f"✅ Audio duration: {duration:.2f} seconds")
             
             # If audio is short enough, process normally
             if duration <= self.chunk_duration_seconds:
-                return await self._transcribe_single_chunk(audio_data, sample_rate)
+                print(f"📝 Processing as single chunk (≤{self.chunk_duration_seconds}s)")
+                result = await self._transcribe_single_chunk(audio_data, sample_rate)
+                print(f"✅ Single chunk transcription completed!")
+                return result
             
             # For longer audio, split into chunks
+            print("🔄 Splitting audio into chunks...")
             chunks = self._split_audio_into_chunks(audio_data, sample_rate)
-            print(f"Split audio into {len(chunks)} chunks")
+            print(f"✅ Split audio into {len(chunks)} chunks")
             
             # Transcribe each chunk
             transcriptions = []
             for i, chunk in enumerate(chunks):
-                print(f"Processing chunk {i+1}/{len(chunks)}")
+                print(f"🔄 Processing chunk {i+1}/{len(chunks)}")
                 chunk_transcription = await self._transcribe_single_chunk(chunk, sample_rate)
                 if chunk_transcription and chunk_transcription.text.strip():
                     transcriptions.append(chunk_transcription.text.strip())
+                    print(f"✅ Chunk {i+1} completed: '{chunk_transcription.text[:30]}...'")
+                else:
+                    print(f"⚠️  Chunk {i+1} produced no transcription")
             
             # Combine all transcriptions
             if transcriptions:
                 combined_text = " ".join(transcriptions)
+                print(f"✅ Combined transcription completed: '{combined_text[:100]}...'")
                 return Transcription(text=combined_text)
             else:
+                print("⚠️  No transcriptions produced")
                 return Transcription(text="")
                 
         except Exception as e:
+            print(f"❌ Failed to transcribe audio: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise ValueError(f"Failed to transcribe audio: {str(e)}")
     
     async def _load_audio_data(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
@@ -179,22 +194,33 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     async def _transcribe_single_chunk(self, audio_data: np.ndarray, sample_rate: int) -> Optional[Transcription]:
         """Transcribe a single audio chunk"""
         try:
+            print(f"🔄 Starting transcription of chunk: {len(audio_data)} samples at {sample_rate}Hz")
+            
             # Process with Whisper using accelerator
+            print("🔄 Processing audio with Whisper processor...")
             with self.accelerator.autocast():
                 input_features = self.processor(
                     audio_data,
                     sampling_rate=sample_rate,
                     return_tensors="pt"
                 ).input_features
+                print(f"✅ Processor completed. Input shape: {input_features.shape}")
                 
                 # Move to accelerator device
+                print(f"🔄 Moving to device: {self.accelerator.device}")
                 input_features = input_features.to(self.accelerator.device)
                 
                 # Ensure model and input are on the same device
                 if self.model.device != input_features.device:
+                    print(f"🔄 Moving input to model device: {self.model.device}")
                     input_features = input_features.to(self.model.device)
                 
                 # Generate transcription with optimized settings
+                print("🔄 Starting Whisper model generation (this is where it might hang)...")
+                print(f"   Model: {self.model_config.model_name}")
+                print(f"   Max length: {self.model_config.max_length}")
+                print(f"   Device: {self.model.device}")
+                
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
@@ -204,17 +230,22 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     pad_token_id=self.processor.tokenizer.eos_token_id,
                     use_cache=True
                 )
+                print("✅ Model generation completed!")
                 
                 # Decode to text
+                print("🔄 Decoding transcription...")
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                print(f"✅ Transcription completed: '{transcription_text[:50]}...'")
                 
                 return Transcription(text=transcription_text)
                 
         except Exception as e:
-            print(f"Error transcribing chunk: {str(e)}")
+            print(f"❌ Error transcribing chunk: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     async def transcribe_stream_chunk(self, audio_chunk: bytes) -> Optional[Transcription]:
