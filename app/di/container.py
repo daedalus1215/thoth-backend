@@ -1,5 +1,6 @@
 from domain.value_objects.audio_config import AudioConfig, ModelConfig
 from domain.value_objects.transcription_engine_config import TranscriptionEngineConfig
+from app.config.settings import config
 from domain.ports.audio_processor import AudioProcessor, TranscriptionEngine, AudioBuffer
 from domain.ports.transcription_repository import TranscriptionRepository
 from domain.ports.transcription_repository import NotificationService
@@ -38,22 +39,22 @@ class DependencyContainer:
     
     def configure(self):
         """Configure all dependencies"""
-        # Configuration
+        # Configuration from environment variables
         self._audio_config = AudioConfig(
-            sample_rate=16000,
-            buffer_duration_seconds=3.0,
-            chunk_overlap=0.1,
-            silence_threshold=0.01,
-            min_audio_length=0.5,
-            confidence_threshold=0.3
+            sample_rate=config.audio.sample_rate,
+            buffer_duration_seconds=config.audio.buffer_duration_seconds,
+            chunk_overlap=config.audio.chunk_overlap,
+            silence_threshold=config.audio.silence_threshold,
+            min_audio_length=config.audio.min_audio_length,
+            confidence_threshold=config.audio.confidence_threshold
         )
         
         self._model_config = ModelConfig(
-            model_name="openai/whisper-large-v3",
-            max_length=448,
-            num_beams=1,
-            do_sample=False,
-            early_stopping=True
+            model_name=config.model.model_name,
+            max_length=config.model.max_length,
+            num_beams=config.model.num_beams,
+            do_sample=config.model.do_sample,
+            early_stopping=config.model.early_stopping
         )
         
         # Infrastructure adapters
@@ -61,10 +62,11 @@ class DependencyContainer:
         
         # Transcription engine configuration
         self._transcription_engine_config = TranscriptionEngineConfig(
-            engine_type="chunked",  # Use chunked engine for long audio files
-            batch_size=4,
-            enable_mixed_precision=True,
-            use_cache=True
+            engine_type=config.transcription_engine.engine_type,
+            batch_size=config.transcription_engine.batch_size,
+            enable_mixed_precision=config.transcription_engine.enable_mixed_precision,
+            use_cache=config.transcription_engine.use_cache,
+            chunk_duration_seconds=config.transcription_engine.chunk_duration_seconds
         )
         
         # Choose transcription engine based on configuration
