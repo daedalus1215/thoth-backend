@@ -197,7 +197,21 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 
                 # Move to next chunk with overlap
                 old_start = start
-                start = end - overlap_samples
+                
+                # Calculate next start position
+                next_start = end - overlap_samples
+                
+                # Ensure we don't go backwards
+                if next_start <= start:
+                    print(f"⚠️  Next start ({next_start}) <= current start ({start}), adjusting...")
+                    next_start = start + (chunk_samples - overlap_samples)
+                
+                # Ensure we don't exceed audio length
+                if next_start >= len(audio_data):
+                    print(f"✅ Reached end of audio at sample {len(audio_data)}")
+                    break
+                
+                start = next_start
                 
                 print(f"📊 Chunk {chunk_num} progress: {old_start/sample_rate:.1f}s → {start/sample_rate:.1f}s (step: {(start-old_start)/sample_rate:.1f}s)")
                 
@@ -207,10 +221,6 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"   end={end}, overlap_samples={overlap_samples}")
                     print(f"   chunk_samples={chunk_samples}")
                     raise ValueError("Chunking logic error: not advancing through audio")
-                
-                if start >= len(audio_data):
-                    print(f"✅ Reached end of audio at sample {len(audio_data)}")
-                    break
             
             # Combine results
             if transcriptions:
