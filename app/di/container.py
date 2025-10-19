@@ -15,6 +15,7 @@ from infra.adapters.transcription.whisper_transcription_engine import WhisperTra
 from infra.adapters.transcription.accelerated_whisper_transcription_engine import AcceleratedWhisperTranscriptionEngine
 from infra.adapters.transcription.batch_transcription_engine import BatchTranscriptionEngine
 from infra.adapters.transcription.chunked_whisper_transcription_engine import ChunkedWhisperTranscriptionEngine
+from infra.adapters.transcription.sequential_whisper_transcription_engine import SequentialWhisperTranscriptionEngine
 from infra.adapters.audio.in_memory_audio_buffer import InMemoryAudioBuffer
 from infra.adapters.repositories.in_memory_transcription_repository import InMemoryTranscriptionRepository
 from infra.adapters.repositories.in_memory_transcription_repository import ConsoleNotificationService
@@ -71,7 +72,18 @@ class DependencyContainer:
         
         # Choose transcription engine based on configuration
         # Use CPU to avoid CUDA memory issues with multiple models
-        if self._transcription_engine_config.engine_type == "chunked":
+        if self._transcription_engine_config.engine_type == "sequential":
+            try:
+                self._transcription_engine = SequentialWhisperTranscriptionEngine(
+                    self._model_config, 
+                    chunk_duration_seconds=30.0
+                )
+                print("Using Sequential Whisper Transcription Engine (30s sliding window)")
+            except Exception as e:
+                print(f"Sequential engine failed to initialize: {e}")
+                print("Falling back to CPU Whisper Transcription Engine")
+                self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
+        elif self._transcription_engine_config.engine_type == "chunked":
             try:
                 self._transcription_engine = ChunkedWhisperTranscriptionEngine(
                     self._model_config, 
