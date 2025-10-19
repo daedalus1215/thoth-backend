@@ -7,6 +7,8 @@ torch
 numpy
 torchaudio
 pillow>=10.0
+librosa
+accelerate
 annotated-types==0.7.0
 anyio==4.11.0
 certifi==2025.10.5

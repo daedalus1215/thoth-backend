@@ -44,3 +44,7 @@ print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
 PY
+
+
+### Run the App
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
