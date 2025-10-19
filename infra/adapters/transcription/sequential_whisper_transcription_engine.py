@@ -332,3 +332,4 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             "engine_type": "sequential"
         }
 
+
