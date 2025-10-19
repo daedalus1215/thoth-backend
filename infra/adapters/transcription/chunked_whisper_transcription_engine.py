@@ -193,6 +193,11 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     
     async def _load_audio_from_bytes(self, audio_file: AudioFile) -> tuple[np.ndarray, int]:
         """Load audio from bytes with multiple fallback methods"""
+        print(f"🔍 Debugging audio file: {audio_file.filename}")
+        print(f"   Content type: {audio_file.content_type}")
+        print(f"   File size: {len(audio_file.content)} bytes")
+        print(f"   First 20 bytes: {audio_file.content[:20].hex()}")
+        
         try:
             # Method 1: Try librosa with BytesIO
             print("🔄 Method 1: Loading with librosa from bytes...")
@@ -262,7 +267,70 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     
                 except Exception as e3:
                     print(f"❌ Method 3 failed: {e3}")
-                    raise ValueError(f"All audio loading methods failed for file: {audio_file.filename}")
+                    
+                    try:
+                        # Method 4: Try raw audio interpretation
+                        print("🔄 Method 4: Trying raw audio interpretation...")
+                        
+                        # Try different raw audio formats
+                        for dtype, sample_rate in [(np.int16, 16000), (np.int32, 16000), (np.float32, 16000)]:
+                            try:
+                                print(f"   Trying {dtype} at {sample_rate}Hz...")
+                                audio_data = np.frombuffer(audio_file.content, dtype=dtype).astype(np.float32)
+                                
+                                # Normalize based on dtype
+                                if dtype == np.int16:
+                                    audio_data = audio_data / 32767.0
+                                elif dtype == np.int32:
+                                    audio_data = audio_data / 2147483647.0
+                                # float32 is already normalized
+                                
+                                # Ensure reasonable length (not too short or too long)
+                                if len(audio_data) > 1000 and len(audio_data) < 10000000:  # 0.06s to 10 minutes at 16kHz
+                                    print(f"✅ Method 4 succeeded with {dtype}: {len(audio_data)} samples at {sample_rate}Hz")
+                                    return audio_data, sample_rate
+                                    
+                            except Exception as e4:
+                                print(f"   Failed with {dtype}: {e4}")
+                                continue
+                        
+                        raise ValueError("Raw audio interpretation failed")
+                        
+                    except Exception as e4:
+                        print(f"❌ Method 4 failed: {e4}")
+                        
+                        try:
+                            # Method 5: Try with different sample rates
+                            print("🔄 Method 5: Trying different sample rates...")
+                            import librosa
+                            import io
+                            
+                            for sr in [8000, 22050, 44100, 48000]:
+                                try:
+                                    print(f"   Trying sample rate {sr}Hz...")
+                                    audio_data, sample_rate = librosa.load(
+                                        io.BytesIO(audio_file.content),
+                                        sr=sr,
+                                        mono=True
+                                    )
+                                    
+                                    # Resample to 16kHz
+                                    if sample_rate != 16000:
+                                        audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+                                        sample_rate = 16000
+                                    
+                                    print(f"✅ Method 5 succeeded at {sr}Hz: {len(audio_data)} samples at {sample_rate}Hz")
+                                    return audio_data, sample_rate
+                                    
+                                except Exception as e5:
+                                    print(f"   Failed at {sr}Hz: {e5}")
+                                    continue
+                            
+                            raise ValueError("All sample rates failed")
+                            
+                        except Exception as e5:
+                            print(f"❌ Method 5 failed: {e5}")
+                            raise ValueError(f"All audio loading methods failed for file: {audio_file.filename}. File appears to be corrupted or in an unsupported format.")
     
     
     
