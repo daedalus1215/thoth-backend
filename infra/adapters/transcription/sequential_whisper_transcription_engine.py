@@ -63,17 +63,25 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
         overlap_samples = int(2.0 * sample_rate)  # 2 second overlap for context
         
         print(f"Using sequential sliding window approach with {self.chunk_duration_seconds}s windows")
+        print(f"📊 Audio data: {len(audio_data)} samples at {sample_rate}Hz")
+        print(f"📊 Expected duration: {len(audio_data)/sample_rate:.1f}s")
+        print(f"📊 Chunk samples: {chunk_samples}")
+        print(f"📊 Overlap samples: {overlap_samples}")
+        print(f"📊 Step size: {chunk_samples - overlap_samples}")
         
         # Initialize sliding window buffer
         sliding_window = []
         transcriptions = []
+        chunk_details = []
         
         start = 0
         chunk_index = 0
+        total_audio_duration = len(audio_data) / sample_rate
         
         while start < len(audio_data):
             end = min(start + chunk_samples, len(audio_data))
             chunk = audio_data[start:end]
+            chunk_duration = len(chunk) / sample_rate
             
             # Add chunk to sliding window
             sliding_window.append(chunk)
@@ -82,26 +90,84 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             if len(sliding_window) > 2:
                 sliding_window.pop(0)
             
-            print(f"Processing sequential chunk {chunk_index + 1} (start: {start/sample_rate:.1f}s, end: {end/sample_rate:.1f}s)")
+            print(f"🔄 Processing sequential chunk {chunk_index + 1} (start: {start/sample_rate:.1f}s, end: {end/sample_rate:.1f}s, duration: {chunk_duration:.1f}s)")
             
             # Transcribe with context from sliding window
             chunk_transcription = await self._transcribe_with_context(sliding_window, sample_rate)
             
             if chunk_transcription and chunk_transcription.text.strip():
+                word_count = len(chunk_transcription.text.strip().split())
                 transcriptions.append(chunk_transcription.text.strip())
+                chunk_details.append({
+                    'index': chunk_index + 1,
+                    'start': start/sample_rate,
+                    'end': end/sample_rate,
+                    'duration': chunk_duration,
+                    'words': word_count,
+                    'text': chunk_transcription.text.strip()[:100] + "..." if len(chunk_transcription.text.strip()) > 100 else chunk_transcription.text.strip()
+                })
+                print(f"✅ Chunk {chunk_index + 1} completed: '{chunk_transcription.text.strip()[:50]}...' ({word_count} words, {chunk_duration:.1f}s)")
+            else:
+                print(f"⚠️  Chunk {chunk_index + 1} produced no transcription")
+                chunk_details.append({
+                    'index': chunk_index + 1,
+                    'start': start/sample_rate,
+                    'end': end/sample_rate,
+                    'duration': chunk_duration,
+                    'words': 0,
+                    'text': '[NO TRANSCRIPTION]'
+                })
             
             # Move to next chunk with overlap
+            old_start = start
             start = end - overlap_samples
             chunk_index += 1
             
+            # Safety check to prevent infinite loops
+            if start <= old_start:
+                print(f"⚠️  Safety check: start not advancing! start={start}, old_start={old_start}")
+                start = old_start + (chunk_samples - overlap_samples)
+            
+            # Check if we've covered the entire audio
             if start >= len(audio_data):
+                print(f"📊 Reached end of audio at chunk {chunk_index}")
                 break
+        
+        # Calculate coverage analysis
+        total_chunks = chunk_index
+        successful_chunks = len([c for c in chunk_details if c['words'] > 0])
+        failed_chunks = total_chunks - successful_chunks
+        total_words = sum(c['words'] for c in chunk_details)
+        
+        print(f"\n🔍 COVERAGE ANALYSIS:")
+        print(f"   📊 Total chunks processed: {total_chunks}")
+        print(f"   📊 Successful chunks: {successful_chunks}")
+        print(f"   📊 Failed chunks: {failed_chunks}")
+        print(f"   📊 Audio duration: {total_audio_duration:.1f}s")
+        print(f"   📊 Expected coverage: {total_chunks * self.chunk_duration_seconds:.1f}s")
+        print(f"   📊 Coverage percentage: {(total_chunks * self.chunk_duration_seconds / total_audio_duration * 100):.1f}%")
+        
+        if failed_chunks > 0:
+            print(f"   ⚠️  Failed chunks: {[c['index'] for c in chunk_details if c['words'] == 0]}")
         
         # Combine all transcriptions
         if transcriptions:
             combined_text = " ".join(transcriptions)
+            words_per_minute = (total_words / total_audio_duration) * 60 if total_audio_duration > 0 else 0
+            
+            print(f"\n✅ FINAL RESULTS:")
+            print(f"   📊 Total words: {total_words}")
+            print(f"   📊 Total characters: {len(combined_text)}")
+            print(f"   📊 Audio duration: {total_audio_duration/60:.1f} minutes")
+            print(f"   📊 Words per minute: {words_per_minute:.1f}")
+            print(f"   📊 Preview: '{combined_text[:200]}...'")
+            
+            if words_per_minute < 100:
+                print(f"   ⚠️  WARNING: Very low WPM ({words_per_minute:.1f}). Expected 150-200 for normal speech.")
+            
             return Transcription(text=combined_text)
         else:
+            print(f"❌ No transcriptions produced!")
             return Transcription(text="")
     
     async def _transcribe_with_context(self, sliding_window: List[np.ndarray], sample_rate: int) -> Optional[Transcription]:
@@ -131,9 +197,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
+                    use_cache=True,
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
                 )
                 
                 # Decode to text
@@ -255,9 +322,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
+                    use_cache=True,
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
                 )
                 
                 # Decode to text
@@ -300,9 +368,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
+                    use_cache=True,
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
                 )
                 
                 # Decode to text

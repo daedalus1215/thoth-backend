@@ -72,6 +72,7 @@ class DependencyContainer:
         
         # Choose transcription engine based on configuration
         # Use CPU to avoid CUDA memory issues with multiple models
+        print(f"🔍 DEBUG: Engine type from config: {self._transcription_engine_config.engine_type}")
         if self._transcription_engine_config.engine_type == "sequential":
             try:
                 self._transcription_engine = SequentialWhisperTranscriptionEngine(

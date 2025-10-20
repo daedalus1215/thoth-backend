@@ -138,17 +138,22 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print("🔄 Loading long audio from bytes...")
             audio_data, sample_rate = await self._load_audio_from_bytes(audio_file)
             
-            # Calculate chunk parameters - optimize for long audio
+            # Calculate chunk parameters - ensure minimum chunk size
             if duration > 300:  # > 5 minutes
                 chunk_duration = min(60.0, duration / 4)  # Larger chunks for long audio
             else:
                 chunk_duration = min(30.0, duration / 2)  # Smaller chunks for short audio
+            
+            # Ensure minimum chunk size for better transcription quality
+            chunk_duration = max(chunk_duration, 15.0)  # Minimum 15 seconds
             print(f"🔄 Processing {duration:.1f}s audio in {chunk_duration:.1f}s chunks...")
             print(f"📊 Audio data: {len(audio_data)} samples at {sample_rate}Hz")
             print(f"📊 Expected duration: {len(audio_data) / sample_rate:.1f}s")
             
             chunk_samples = int(chunk_duration * sample_rate)
-            overlap_samples = int(2.0 * sample_rate)  # 2 second overlap
+            # Adaptive overlap: smaller overlap for larger chunks
+            overlap_seconds = min(3.0, chunk_duration * 0.1)  # 3 seconds max, or 10% of chunk
+            overlap_samples = int(overlap_seconds * sample_rate)
             
             print(f"📊 Chunk samples: {chunk_samples}")
             print(f"📊 Overlap samples: {overlap_samples}")
@@ -157,10 +162,16 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             transcriptions = []
             start = 0
             chunk_num = 0
+            failed_chunks = []
+            skipped_chunks = []
             
             # Safety check: prevent infinite loops
             max_expected_chunks = int(duration / chunk_duration) + 10  # Add buffer
             print(f"🛡️  Safety check: Max expected chunks = {max_expected_chunks}")
+            
+            # Calculate expected coverage
+            total_audio_samples = len(audio_data)
+            expected_coverage_samples = 0
             
             while start < len(audio_data):
                 # Safety check: prevent infinite loops
@@ -172,11 +183,25 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"   Sample rate: {sample_rate}Hz")
                     raise ValueError(f"Too many chunks generated ({chunk_num}). Audio file may be corrupted.")
                 
+                # Calculate chunk end, but ensure minimum chunk size
                 end = min(start + chunk_samples, len(audio_data))
+                remaining_samples = len(audio_data) - start
+                
+                # Skip chunks that are too small (less than 10 seconds)
+                if remaining_samples < (10 * sample_rate):
+                    print(f"⚠️  Skipping final chunk: only {remaining_samples/sample_rate:.1f}s remaining (too short)")
+                    break
+                
                 chunk = audio_data[start:end]
                 chunk_num += 1
                 
                 print(f"🔄 Processing chunk {chunk_num}/{max_expected_chunks} ({start/sample_rate:.1f}s - {end/sample_rate:.1f}s)")
+                
+                # Track chunk coverage
+                chunk_duration_actual = len(chunk) / sample_rate
+                expected_coverage_samples += len(chunk)
+                
+                print(f"📊 Chunk {chunk_num} coverage: {start/sample_rate:.1f}s - {end/sample_rate:.1f}s ({chunk_duration_actual:.1f}s)")
                 
                 # Process chunk with timeout
                 try:
@@ -186,13 +211,45 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     )
                     
                     if chunk_result and chunk_result.text.strip():
-                        transcriptions.append(chunk_result.text.strip())
-                        print(f"✅ Chunk {chunk_num} completed: '{chunk_result.text[:30]}...'")
+                        # Validate transcription quality
+                        text = chunk_result.text.strip()
+                        word_count = len(text.split())
+                        
+                        # Check for suspiciously short transcriptions
+                        if word_count < 2 and chunk_duration_actual > 10:
+                            print(f"⚠️  Chunk {chunk_num} suspiciously short: '{text}' ({word_count} words, {chunk_duration_actual:.1f}s)")
+                            skipped_chunks.append({
+                                'chunk': chunk_num,
+                                'start': start/sample_rate,
+                                'end': end/sample_rate,
+                                'duration': chunk_duration_actual,
+                                'words': word_count,
+                                'text': text
+                            })
+                        else:
+                            print(f"✅ Chunk {chunk_num} completed: '{text[:50]}...' ({word_count} words, {chunk_duration_actual:.1f}s)")
+                        
+                        transcriptions.append(text)
                     else:
-                        print(f"⚠️  Chunk {chunk_num} produced no transcription")
+                        print(f"⚠️  Chunk {chunk_num} produced no transcription ({chunk_duration_actual:.1f}s)")
+                        skipped_chunks.append({
+                            'chunk': chunk_num,
+                            'start': start/sample_rate,
+                            'end': end/sample_rate,
+                            'duration': chunk_duration_actual,
+                            'words': 0,
+                            'text': ''
+                        })
                         
                 except asyncio.TimeoutError:
                     print(f"⚠️  Chunk {chunk_num} timed out - skipping")
+                    failed_chunks.append({
+                        'chunk': chunk_num,
+                        'start': start/sample_rate,
+                        'end': end/sample_rate,
+                        'duration': chunk_duration_actual,
+                        'error': 'timeout'
+                    })
                     continue
                 
                 # Move to next chunk with overlap
@@ -222,10 +279,48 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"   chunk_samples={chunk_samples}")
                     raise ValueError("Chunking logic error: not advancing through audio")
             
+            # Comprehensive coverage analysis
+            print(f"\n🔍 COVERAGE ANALYSIS:")
+            print(f"   📊 Total chunks processed: {chunk_num}")
+            print(f"   📊 Successful chunks: {len(transcriptions)}")
+            print(f"   📊 Failed chunks: {len(failed_chunks)}")
+            print(f"   📊 Skipped chunks: {len(skipped_chunks)}")
+            print(f"   📊 Audio duration: {duration:.1f}s")
+            print(f"   📊 Expected coverage: {expected_coverage_samples/sample_rate:.1f}s")
+            print(f"   📊 Coverage percentage: {(expected_coverage_samples/total_audio_samples)*100:.1f}%")
+            
+            # Show failed/skipped chunks
+            if failed_chunks:
+                print(f"\n❌ FAILED CHUNKS:")
+                for chunk_info in failed_chunks:
+                    print(f"   Chunk {chunk_info['chunk']}: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s ({chunk_info['error']})")
+            
+            if skipped_chunks:
+                print(f"\n⚠️  SKIPPED CHUNKS:")
+                for chunk_info in skipped_chunks:
+                    if chunk_info['words'] == 0:
+                        print(f"   Chunk {chunk_info['chunk']}: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s (no transcription)")
+                    else:
+                        print(f"   Chunk {chunk_info['chunk']}: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s ({chunk_info['words']} words: '{chunk_info['text'][:30]}...')")
+            
             # Combine results
             if transcriptions:
                 combined_text = " ".join(transcriptions)
-                print(f"✅ Combined {len(transcriptions)} chunks: '{combined_text[:100]}...'")
+                total_words = len(combined_text.split())
+                total_chars = len(combined_text)
+                audio_duration_minutes = duration / 60
+                
+                print(f"\n✅ FINAL RESULTS:")
+                print(f"   📊 Total words: {total_words}")
+                print(f"   📊 Total characters: {total_chars}")
+                print(f"   📊 Audio duration: {audio_duration_minutes:.1f} minutes")
+                print(f"   📊 Words per minute: {total_words / audio_duration_minutes:.1f}")
+                print(f"   📊 Preview: '{combined_text[:100]}...'")
+                
+                # Check for missing text
+                if total_words / audio_duration_minutes < 50:
+                    print(f"⚠️  WARNING: Very low words per minute ({total_words / audio_duration_minutes:.1f}). Large portions of audio may be missing!")
+                
                 return Transcription(text=combined_text)
             else:
                 print("⚠️  No transcriptions produced from any chunks")
@@ -317,7 +412,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                         print("🔄 Method 4: Trying raw audio interpretation...")
                         
                         # Try different raw audio formats
-                        for dtype, sample_rate in [(np.int16, 16000), (np.int32, 16000), (np.float32, 16000)]:
+                        for dtype, sample_rate in [(np.int16, 16000), (np.int32, 16000), (np.float32, 16000), (np.int16, 44100), (np.int16, 48000)]:
                             try:
                                 print(f"   Trying {dtype} at {sample_rate}Hz...")
                                 audio_data = np.frombuffer(audio_file.content, dtype=dtype).astype(np.float32)
@@ -328,6 +423,12 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                                 elif dtype == np.int32:
                                     audio_data = audio_data / 2147483647.0
                                 # float32 is already normalized
+                                
+                                # Resample to 16kHz if needed
+                                if sample_rate != 16000:
+                                    import librosa
+                                    audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+                                    sample_rate = 16000
                                 
                                 # Ensure reasonable length (not too short or too long)
                                 if len(audio_data) > 1000 and len(audio_data) < 10000000:  # 0.06s to 10 minutes at 16kHz
@@ -407,15 +508,18 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 print(f"   Model: {self.model_config.model_name}")
                 print(f"   Max length: {self.model_config.max_length}")
                 print(f"   Device: {self.model.device}")
+                print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
+                print(f"   Audio samples: {len(audio_data)}")
                 
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
+                    use_cache=True,
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
                 )
                 print("✅ Model generation completed!")
                 
@@ -462,9 +566,10 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
+                    use_cache=True,
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
                 )
                 
                 # Decode to text

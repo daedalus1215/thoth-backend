@@ -53,11 +53,30 @@ class TranscriptionController:
             print(f"✅ File validation passed. Starting transcription...")
             audio_file = AudioFile.from_upload_file(file)
             
+            # Verify file was read completely
+            print(f"📊 File read verification:")
+            print(f"   Upload file size: {file.size} bytes")
+            print(f"   AudioFile size: {audio_file.size} bytes")
+            print(f"   Content length: {len(audio_file.content)} bytes")
+            
+            if file.size and audio_file.size != file.size:
+                print(f"⚠️  WARNING: File size mismatch! Upload={file.size}, Read={audio_file.size}")
+            else:
+                print(f"✅ File read completely")
+            
             # Add timeout to prevent infinite hanging
             import asyncio
+            
+            # Calculate timeout based on file size (more generous for large files)
+            estimated_duration_minutes = (file.size or 0) / (32000 * 60)  # Rough estimate: 32KB per minute
+            timeout_minutes = max(5, estimated_duration_minutes * 2)  # At least 5 minutes, or 2x estimated duration
+            timeout_seconds = min(timeout_minutes * 60, 1800)  # Cap at 30 minutes
+            
+            print(f"⏱️  Setting timeout to {timeout_seconds/60:.1f} minutes for {file.size} byte file")
+            
             transcription = await asyncio.wait_for(
                 self.transcribe_audio_use_case.execute(audio_file, self.audio_config),
-                timeout=300.0  # 5 minute timeout
+                timeout=timeout_seconds
             )
             
             print(f"✅ Transcription completed successfully")
