@@ -48,3 +48,27 @@ PY
 
 ### Run the App
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+or
+uvicorn main:app --host {ip address} --reload --ssl-keyfile={path to key} --ssl-certfile={path to crt} --port 8443
+
+## Transcription Engine Configuration
+
+The service uses **two separate transcription engines** optimized for different use cases:
+
+### 🎤 Real-Time Streaming (`/stream-audio`)
+- **Engine**: Chunked Whisper Transcription Engine
+- **Chunk Duration**: 3 seconds
+- **Optimization**: **LATENCY** - Fastest response rate for real-time transcription
+- **GPU Usage**: Both engines use CUDA (use cases never run simultaneously)
+
+### 📁 File Uploads (`/transcribe/`, `/upload`)
+- **Engine**: Sequential Whisper Transcription Engine  
+- **Chunk Duration**: 30 seconds with sliding window
+- **Optimization**: **ACCURACY** - Maximum transcription quality using sliding window overlap
+- **GPU Usage**: Both engines use CUDA (use cases never run simultaneously)
+
+### Key Points:
+- ✅ Both engines use **CUDA/GPU** by default (CPU was only used due to concurrent model concerns)
+- ✅ Sequential engine provides **best accuracy** for uploaded files via sliding window processing
+- ✅ Chunked engine provides **best latency** for real-time streaming via smaller 3s chunks
+- ✅ Engines are **never run simultaneously**, allowing both to leverage GPU resources

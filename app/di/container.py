@@ -70,47 +70,36 @@ class DependencyContainer:
             chunk_duration_seconds=config.transcription_engine.chunk_duration_seconds
         )
         
-        # Choose transcription engine based on configuration
-        # Use CPU to avoid CUDA memory issues with multiple models
-        if self._transcription_engine_config.engine_type == "sequential":
-            try:
-                self._transcription_engine = SequentialWhisperTranscriptionEngine(
-                    self._model_config, 
-                    chunk_duration_seconds=30.0
-                )
-                print("Using Sequential Whisper Transcription Engine (30s sliding window)")
-            except Exception as e:
-                print(f"Sequential engine failed to initialize: {e}")
-                print("Falling back to CPU Whisper Transcription Engine")
-                self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
-        elif self._transcription_engine_config.engine_type == "chunked":
-            try:
-                self._transcription_engine = ChunkedWhisperTranscriptionEngine(
-                    self._model_config, 
-                    chunk_duration_seconds=30.0
-                )
-                print("Using Chunked Whisper Transcription Engine (30s chunks)")
-            except Exception as e:
-                print(f"Chunked engine failed to initialize: {e}")
-                print("Falling back to CPU Whisper Transcription Engine")
-                self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
-        elif self._transcription_engine_config.is_accelerated():
-            self._transcription_engine = AcceleratedWhisperTranscriptionEngine(self._model_config)
-            print("Using Accelerated Whisper Transcription Engine")
-        elif self._transcription_engine_config.is_batch():
-            self._transcription_engine = BatchTranscriptionEngine(
+        # Choose transcription engine for FILE UPLOADS (Use Case 2: Best accuracy)
+        # Always use Sequential for file uploads for maximum accuracy
+        print(f"🔍 DEBUG: Engine type from config: {self._transcription_engine_config.engine_type}")
+        try:
+            self._transcription_engine = SequentialWhisperTranscriptionEngine(
                 self._model_config, 
-                batch_size=self._transcription_engine_config.batch_size
+                chunk_duration_seconds=30.0
             )
-            print(f"Using Batch Transcription Engine (batch_size={self._transcription_engine_config.batch_size})")
-        else:
-            self._transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
-            print("Using CPU Whisper Transcription Engine")
+            print("✅ Using Sequential Whisper Transcription Engine (30s sliding window) - OPTIMIZED FOR ACCURACY")
+            print("📁 Use Case: File uploads for best transcription quality")
+        except Exception as e:
+            print(f"❌ Sequential engine failed to initialize: {e}")
+            print("⚠️  Falling back to basic Whisper Transcription Engine")
+            self._transcription_engine = WhisperTranscriptionEngine(self._model_config)
         
-        # Create a separate streaming engine optimized for real-time audio
-        # Use CPU for streaming to avoid CUDA memory issues with dual models
-        self._streaming_transcription_engine = WhisperTranscriptionEngine(self._model_config, device="cpu")
-        print("Using CPU Whisper Transcription Engine for streaming (to avoid CUDA memory issues)")
+        # Create a separate streaming engine for REAL-TIME TRANSCRIPTION (Use Case 1: Best latency)
+        # Use Chunked for streaming to get best response rate
+        try:
+            self._streaming_transcription_engine = ChunkedWhisperTranscriptionEngine(
+                self._model_config, 
+                chunk_duration_seconds=3.0  # Shorter chunks for real-time performance
+            )
+            print("✅ Using Chunked Whisper Transcription Engine (3s chunks) - OPTIMIZED FOR LATENCY")
+            print("🎤 Use Case: Real-time streaming for best response rate")
+        except Exception as e:
+            print(f"❌ Chunked engine failed to initialize: {e}")
+            print("⚠️  Falling back to basic Whisper Transcription Engine for streaming")
+            self._streaming_transcription_engine = WhisperTranscriptionEngine(self._model_config)
+        
+        # Note: Both engines use GPU/CUDA by default since use cases never run simultaneously
         
         self._audio_buffer = InMemoryAudioBuffer(self._audio_config)
         self._transcription_repository = InMemoryTranscriptionRepository()

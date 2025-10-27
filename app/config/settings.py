@@ -12,6 +12,8 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = True
+    ssl_keyfile: str = None  # Path to SSL key file
+    ssl_certfile: str = None  # Path to SSL certificate file
 
 
 @dataclass
@@ -29,6 +31,7 @@ class CORSConfig:
                 "http://127.0.0.1:3000",
                 "http://127.0.0.1:8080",
                 "http://127.0.0.1:9000",
+                "https://127.0.0.1:9000",
                 "http://127.0.0.1:9001",
             ]
 
@@ -87,7 +90,9 @@ class Config:
         return ServerConfig(
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),
-            debug=os.getenv("DEBUG", "true").lower() == "true"
+            debug=os.getenv("DEBUG", "true").lower() == "true",
+            ssl_keyfile=os.getenv("SSL_KEYFILE"),
+            ssl_certfile=os.getenv("SSL_CERTFILE")
         )
     
     def _load_cors_config(self) -> CORSConfig:

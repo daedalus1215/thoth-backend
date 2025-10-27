@@ -16,8 +16,12 @@ RUN pip3 install --no-cache-dir websockets uvicorn[standard]  # Explicitly insta
 # Copy your application code
 COPY . .
 
+# Create SSL directory
+RUN mkdir -p /app/ssl
+
 # Expose the port
 EXPOSE 8000
 
 # Run the FastAPI application with explicit websocket support
-CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets"]
+# SSL configuration is handled via environment variables in docker-compose.yml or .env file
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

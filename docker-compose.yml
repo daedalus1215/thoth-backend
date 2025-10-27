@@ -6,6 +6,9 @@ services:
     runtime: nvidia
     ports:
       - "8000:8000"
+    volumes:
+      # Mount SSL certificates if they exist (optional)
+      - ./ssl:/app/ssl:ro  # Mount SSL directory as read-only
     deploy:
       resources:
         reservations:
@@ -17,3 +20,6 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=0
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # SSL configuration (set these in .env file or uncomment to use)
+      # - SSL_KEYFILE=/app/ssl/server.key
+      # - SSL_CERTFILE=/app/ssl/server.crt

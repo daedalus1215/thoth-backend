@@ -2,6 +2,7 @@ import torch
 import torchaudio
 from transformers import WhisperProcessor
 from fastapi import UploadFile
+from app.config.settings import config
 
 class AdjustSampleRateTransactionScript: 
     _target_sampling_rate = 16000
@@ -18,7 +19,7 @@ class AdjustSampleRateTransactionScript:
             audio = torch.mean(audio, dim=0, keepdim=True)
 
         # Process audio with Whisper processor
-        processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+        processor = WhisperProcessor.from_pretrained(config.model.model_name)
         inputs = processor(audio.squeeze().numpy(), return_tensors="pt", sampling_rate=self._target_sampling_rate).input_features.to("cuda")
 
         return inputs

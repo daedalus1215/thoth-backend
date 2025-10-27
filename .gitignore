@@ -10,3 +10,5 @@ venv/*
 **/*.pywz
 **/*.pyzw
 .env.local*
+.env
+thoth-certs/*
