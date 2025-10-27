@@ -48,7 +48,8 @@ PY
 
 ### Run the App
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
+or
+uvicorn main:app --host {ip address} --reload --ssl-keyfile={path to key} --ssl-certfile={path to crt} --port 8443
 
 ## Transcription Engine Configuration
 
