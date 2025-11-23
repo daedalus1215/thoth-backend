@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import librosa
 import io
+import re
 from typing import Optional, List
 import asyncio
 
@@ -151,8 +152,10 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"📊 Expected duration: {len(audio_data) / sample_rate:.1f}s")
             
             chunk_samples = int(chunk_duration * sample_rate)
-            # Adaptive overlap: smaller overlap for larger chunks
-            overlap_seconds = min(3.0, chunk_duration * 0.1)  # 3 seconds max, or 10% of chunk
+            # Increased overlap for better accuracy: 15% of chunk or 4 seconds, whichever is larger
+            # This provides better context and helps with deduplication
+            overlap_seconds = max(4.0, chunk_duration * 0.15)  # At least 4 seconds, or 15% of chunk
+            overlap_seconds = min(overlap_seconds, chunk_duration * 0.3)  # Cap at 30% to avoid excessive overlap
             overlap_samples = int(overlap_seconds * sample_rate)
             
             print(f"📊 Chunk samples: {chunk_samples}")
@@ -160,6 +163,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"📊 Step size: {chunk_samples - overlap_samples}")
             
             transcriptions = []
+            chunk_metadata = []  # Store metadata for each chunk to help with smart merging
             start = 0
             chunk_num = 0
             failed_chunks = []
@@ -230,6 +234,14 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                             print(f"✅ Chunk {chunk_num} completed: '{text[:50]}...' ({word_count} words, {chunk_duration_actual:.1f}s)")
                         
                         transcriptions.append(text)
+                        # Store metadata for smart merging
+                        chunk_metadata.append({
+                            'text': text,
+                            'start_time': start/sample_rate,
+                            'end_time': end/sample_rate,
+                            'word_count': word_count,
+                            'chunk_index': chunk_num
+                        })
                     else:
                         print(f"⚠️  Chunk {chunk_num} produced no transcription ({chunk_duration_actual:.1f}s)")
                         skipped_chunks.append({
@@ -303,9 +315,11 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     else:
                         print(f"   Chunk {chunk_info['chunk']}: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s ({chunk_info['words']} words: '{chunk_info['text'][:30]}...')")
             
-            # Combine results
+            # Combine results with smart deduplication
             if transcriptions:
-                combined_text = " ".join(transcriptions)
+                combined_text = self._merge_transcriptions_smart(chunk_metadata, overlap_seconds)
+                # Post-process to clean up text
+                combined_text = self._post_process_transcription(combined_text)
                 total_words = len(combined_text.split())
                 total_chars = len(combined_text)
                 audio_duration_minutes = duration / 60
@@ -582,6 +596,168 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                 
         except Exception as e:
             raise ValueError(f"Failed to transcribe stream chunk: {str(e)}")
+    
+    def _merge_transcriptions_smart(self, chunk_metadata: List[dict], overlap_seconds: float) -> str:
+        """
+        Intelligently merge transcriptions by removing duplicates from overlap regions.
+        Uses conservative matching to avoid breaking sentences.
+        """
+        if not chunk_metadata:
+            return ""
+        
+        if len(chunk_metadata) == 1:
+            return self._clean_chunk_text(chunk_metadata[0]['text'])
+        
+        print(f"\n🔗 Smart merging {len(chunk_metadata)} transcriptions...")
+        
+        merged_parts = []
+        previous_text = ""
+        previous_words = []
+        
+        for i, chunk_info in enumerate(chunk_metadata):
+            # Clean chunk text first (remove filler words at boundaries)
+            current_text = self._clean_chunk_text(chunk_info['text'])
+            if not current_text.strip():
+                print(f"   Chunk {i+1}: Skipped (empty after cleaning)")
+                continue
+                
+            current_words = current_text.split()
+            
+            if i == 0:
+                # First chunk: add all text
+                merged_parts.append(current_text)
+                previous_text = current_text
+                previous_words = current_words
+                print(f"   Chunk {i+1}: Added {len(current_words)} words (first chunk)")
+                continue
+            
+            # Estimate overlap in words based on overlap duration
+            # Average speaking rate: ~150 words per minute = 2.5 words per second
+            estimated_overlap_words = int(overlap_seconds * 2.5)
+            
+            # Find the best overlap point by comparing end of previous with start of current
+            # Use more conservative matching - require higher similarity and exact word sequence match
+            overlap_found = False
+            best_overlap_length = 0
+            
+            # Try to find matching sequences - be more conservative
+            max_overlap = min(len(previous_words), len(current_words), estimated_overlap_words + 3)
+            for overlap_length in range(max_overlap, 2, -1):  # Require at least 3 words to match
+                # Check if last N words of previous match first N words of current
+                prev_suffix_words = previous_words[-overlap_length:]
+                curr_prefix_words = current_words[:overlap_length]
+                
+                # First check exact match (case-insensitive)
+                prev_suffix = " ".join(prev_suffix_words).lower()
+                curr_prefix = " ".join(curr_prefix_words).lower()
+                
+                if prev_suffix == curr_prefix:
+                    # Exact match - this is reliable
+                    best_overlap_length = overlap_length
+                    overlap_found = True
+                    break
+                
+                # Only use fuzzy matching for longer sequences and require very high similarity
+                if overlap_length >= 5:
+                    similarity = self._text_similarity(prev_suffix, curr_prefix)
+                    if similarity > 0.9:  # Increased threshold from 0.7 to 0.9
+                        best_overlap_length = overlap_length
+                        overlap_found = True
+                        break
+            
+            if overlap_found and best_overlap_length > 0:
+                # Remove overlapping words from current chunk
+                new_words = current_words[best_overlap_length:]
+                if new_words:
+                    new_text = " ".join(new_words)
+                    merged_parts.append(new_text)
+                    print(f"   Chunk {i+1}: Removed {best_overlap_length} overlapping words, added {len(new_words)} new words")
+                else:
+                    print(f"   Chunk {i+1}: Entirely overlapped, skipped")
+            else:
+                # No clear overlap found - just append (safer than guessing)
+                merged_parts.append(current_text)
+                print(f"   Chunk {i+1}: Added {len(current_words)} words (no clear overlap detected)")
+            
+            previous_text = current_text
+            previous_words = current_words
+        
+        merged_text = " ".join(merged_parts)
+        print(f"✅ Smart merge completed: {len(merged_text.split())} total words")
+        return merged_text
+    
+    def _clean_chunk_text(self, text: str) -> str:
+        """
+        Clean chunk text by removing common filler words at boundaries.
+        This helps reduce "Okay." and other artifacts at chunk starts.
+        """
+        if not text or not text.strip():
+            return text
+        
+        # Common filler words/phrases that Whisper adds at chunk boundaries
+        filler_patterns = [
+            r'^\s*okay\.?\s*',
+            r'^\s*ok\.?\s*',
+            r'^\s*um\s+',
+            r'^\s*uh\s+',
+            r'^\s*ah\s+',
+        ]
+        
+        cleaned = text.strip()
+        
+        # Remove filler words at the start
+        for pattern in filler_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        return cleaned.strip()
+    
+    def _post_process_transcription(self, text: str) -> str:
+        """
+        Post-process the final transcription to fix common issues:
+        - Remove duplicate periods
+        - Fix spacing around punctuation
+        - Remove excessive whitespace
+        """
+        if not text:
+            return text
+        
+        # Remove duplicate periods (e.g., "word.." -> "word.")
+        text = re.sub(r'\.{2,}', '.', text)
+        
+        # Fix spacing: ensure single space after periods, but not multiple spaces
+        text = re.sub(r'\.\s+', '. ', text)
+        text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces to single space
+        
+        # Remove periods that appear in the middle of words (artifacts)
+        # This catches cases like "word. word" where the period shouldn't be there
+        # But be careful - we don't want to remove legitimate periods
+        # Only remove if it's a single period surrounded by spaces with lowercase letters
+        text = re.sub(r'\s+\.\s+([a-z])', r' \1', text)  # Remove ". " before lowercase
+        
+        # Clean up any remaining artifacts
+        text = text.strip()
+        
+        return text
+    
+    def _text_similarity(self, text1: str, text2: str) -> float:
+        """
+        Calculate similarity between two text strings using word overlap.
+        Returns a value between 0.0 and 1.0.
+        """
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        if not union:
+            return 0.0
+        
+        # Jaccard similarity
+        return len(intersection) / len(union)
     
     def reset_stream_state(self) -> None:
         """Reset the state for streaming transcription"""
