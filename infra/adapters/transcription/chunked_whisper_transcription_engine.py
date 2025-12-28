@@ -2,14 +2,17 @@ from domain.entities.audio_file import AudioFile
 from domain.entities.transcription import Transcription
 from domain.ports.audio_processor import TranscriptionEngine
 from domain.value_objects.audio_config import ModelConfig
+from domain.services.transcription_post_processor import TranscriptionPostProcessor
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from accelerate import Accelerator
 import torch
 import numpy as np
 import librosa
 import io
+import re
 from typing import Optional, List
 import asyncio
+from infra.adapters.transcription.shared_model_manager import SharedModelManager
 
 
 class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
@@ -18,23 +21,10 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     def __init__(self, model_config: ModelConfig, chunk_duration_seconds: float = 30.0):
         self.model_config = model_config
         self.chunk_duration_seconds = chunk_duration_seconds
-        self.accelerator = Accelerator()
         
-        # Load model and processor
-        self.processor = WhisperProcessor.from_pretrained(model_config.model_name)
-        self.model = WhisperForConditionalGeneration.from_pretrained(model_config.model_name)
-        
-        # Move model to accelerator device
-        self.model = self.model.to(self.accelerator.device)
-        
-        # Enable mixed precision if supported and on GPU
-        if torch.cuda.is_available() and self.accelerator.device.type == 'cuda':
-            if self.accelerator.mixed_precision == "fp16":
-                print("Using FP16 mixed precision for faster inference")
-            elif self.accelerator.mixed_precision == "bf16":
-                print("Using BF16 mixed precision for faster inference")
-        else:
-            print(f"Using CPU inference on device: {self.accelerator.device}")
+        # Use shared model manager to avoid loading duplicate models
+        self._model_manager = SharedModelManager()
+        self.model, self.processor, self.accelerator = self._model_manager.get_model(model_config)
         
         print(f"Chunked transcription engine initialized with {chunk_duration_seconds}s chunks")
     
@@ -151,8 +141,10 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"📊 Expected duration: {len(audio_data) / sample_rate:.1f}s")
             
             chunk_samples = int(chunk_duration * sample_rate)
-            # Adaptive overlap: smaller overlap for larger chunks
-            overlap_seconds = min(3.0, chunk_duration * 0.1)  # 3 seconds max, or 10% of chunk
+            # Increased overlap for better accuracy: 15% of chunk or 4 seconds, whichever is larger
+            # This provides better context and helps with deduplication
+            overlap_seconds = max(4.0, chunk_duration * 0.15)  # At least 4 seconds, or 15% of chunk
+            overlap_seconds = min(overlap_seconds, chunk_duration * 0.3)  # Cap at 30% to avoid excessive overlap
             overlap_samples = int(overlap_seconds * sample_rate)
             
             print(f"📊 Chunk samples: {chunk_samples}")
@@ -160,6 +152,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"📊 Step size: {chunk_samples - overlap_samples}")
             
             transcriptions = []
+            chunk_metadata = []  # Store metadata for each chunk to help with smart merging
             start = 0
             chunk_num = 0
             failed_chunks = []
@@ -230,6 +223,14 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                             print(f"✅ Chunk {chunk_num} completed: '{text[:50]}...' ({word_count} words, {chunk_duration_actual:.1f}s)")
                         
                         transcriptions.append(text)
+                        # Store metadata for smart merging
+                        chunk_metadata.append({
+                            'text': text,
+                            'start_time': start/sample_rate,
+                            'end_time': end/sample_rate,
+                            'word_count': word_count,
+                            'chunk_index': chunk_num
+                        })
                     else:
                         print(f"⚠️  Chunk {chunk_num} produced no transcription ({chunk_duration_actual:.1f}s)")
                         skipped_chunks.append({
@@ -303,9 +304,11 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     else:
                         print(f"   Chunk {chunk_info['chunk']}: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s ({chunk_info['words']} words: '{chunk_info['text'][:30]}...')")
             
-            # Combine results
+            # Combine results with smart deduplication
             if transcriptions:
-                combined_text = " ".join(transcriptions)
+                combined_text = self._merge_transcriptions_smart(chunk_metadata, overlap_seconds)
+                # Post-process to clean up text
+                combined_text = TranscriptionPostProcessor.post_process(combined_text)
                 total_words = len(combined_text.split())
                 total_chars = len(combined_text)
                 audio_duration_minutes = duration / 60
@@ -484,54 +487,94 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         try:
             print(f"🔄 Starting transcription of chunk: {len(audio_data)} samples at {sample_rate}Hz")
             
-            # Process with Whisper using accelerator
+            # Process with Whisper processor (outside autocast to control dtype)
             print("🔄 Processing audio with Whisper processor...")
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=sample_rate,
-                    return_tensors="pt"
-                ).input_features
-                print(f"✅ Processor completed. Input shape: {input_features.shape}")
-                
-                # Move to accelerator device
-                print(f"🔄 Moving to device: {self.accelerator.device}")
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=sample_rate,
+                return_tensors="pt"
+            ).input_features
+            print(f"✅ Processor completed. Input shape: {input_features.shape}")
+            
+            # Clear CUDA cache before moving tensors to avoid OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Move to accelerator device
+            print(f"🔄 Moving to device: {self.accelerator.device}")
+            try:
                 input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
-                    print(f"🔄 Moving input to model device: {self.model.device}")
+            except torch.cuda.OutOfMemoryError:
+                # If OOM, clear cache and try again
+                torch.cuda.empty_cache()
+                input_features = input_features.to(self.accelerator.device)
+            
+            # Ensure model and input are on the same device
+            if self.model.device != input_features.device:
+                print(f"🔄 Moving input to model device: {self.model.device}")
+                try:
                     input_features = input_features.to(self.model.device)
-                
-                # Generate transcription with optimized settings
-                print("🔄 Starting Whisper model generation (this is where it might hang)...")
-                print(f"   Model: {self.model_config.model_name}")
-                print(f"   Max length: {self.model_config.max_length}")
-                print(f"   Device: {self.model.device}")
-                print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
-                print(f"   Audio samples: {len(audio_data)}")
-                
+                except torch.cuda.OutOfMemoryError:
+                    # If OOM, clear cache and try again
+                    torch.cuda.empty_cache()
+                    input_features = input_features.to(self.model.device)
+            
+            # Convert input to match model dtype (float16 if model is in half precision)
+            # This MUST happen before generation to ensure correct dtype
+            # Always convert to float16 if on CUDA, regardless of model dtype check
+            if torch.cuda.is_available():
+                if input_features.dtype == torch.float32:
+                    print(f"🔄 Converting input from float32 to float16 for CUDA")
+                    input_features = input_features.to(dtype=torch.float16)
+                    print(f"✅ Input dtype after conversion: {input_features.dtype}")
+            else:
+                # On CPU, try to match model dtype
+                try:
+                    model_dtype = next(self.model.parameters()).dtype
+                    print(f"🔍 Model dtype: {model_dtype}, Input dtype: {input_features.dtype}")
+                    if input_features.dtype != model_dtype:
+                        print(f"🔄 Converting input dtype from {input_features.dtype} to {model_dtype}")
+                        input_features = input_features.to(dtype=model_dtype)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not get model dtype: {e}")
+            
+            # Generate transcription with optimized settings
+            print("🔄 Starting Whisper model generation (this is where it might hang)...")
+            print(f"   Model: {self.model_config.model_name}")
+            print(f"   Max length: {self.model_config.max_length}")
+            print(f"   Device: {self.model.device}")
+            print(f"   Input dtype: {input_features.dtype}")
+            print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
+            print(f"   Audio samples: {len(audio_data)}")
+            
+            # Use torch.no_grad() to reduce memory usage during inference
+            with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True,
+                    use_cache=False,  # Disable cache to save memory
                     language="en",  # Force English to avoid language detection issues
                     task="transcribe"  # Explicitly set task
                 )
-                print("✅ Model generation completed!")
-                
-                # Decode to text
-                print("🔄 Decoding transcription...")
-                transcription_text = self.processor.batch_decode(
-                    predicted_ids,
-                    skip_special_tokens=True
-                )[0]
-                print(f"✅ Transcription completed: '{transcription_text[:50]}...'")
-                
-                return Transcription(text=transcription_text)
+            print("✅ Model generation completed!")
+            
+            # Decode to text
+            print("🔄 Decoding transcription...")
+            transcription_text = self.processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True
+            )[0]
+            print(f"✅ Transcription completed: '{transcription_text[:50]}...'")
+            
+            # Clean up GPU memory
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
+            
+            return Transcription(text=transcription_text)
                 
         except Exception as e:
             print(f"❌ Error transcribing chunk: {str(e)}")
@@ -545,29 +588,60 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             # Convert bytes to numpy array
             audio_data = np.frombuffer(audio_chunk, dtype=np.float32)
             
-            # Process with Whisper using accelerator
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=16000,
-                    return_tensors="pt"
-                ).input_features
-                
-                # Move to accelerator device
+            # Process with Whisper processor (outside autocast to control dtype)
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=16000,
+                return_tensors="pt"
+            ).input_features
+            
+            # Clear CUDA cache before moving tensors to avoid OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Move to accelerator device
+            try:
                 input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                input_features = input_features.to(self.accelerator.device)
+            
+            # Ensure model and input are on the same device
+            if self.model.device != input_features.device:
+                try:
                     input_features = input_features.to(self.model.device)
-                
-                # Generate transcription
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    input_features = input_features.to(self.model.device)
+            
+            # Convert input to match model dtype (float16 if model is in half precision)
+            # This MUST happen before generation to ensure correct dtype
+            # Always convert to float16 if on CUDA, regardless of model dtype check
+            if torch.cuda.is_available():
+                if input_features.dtype == torch.float32:
+                    print(f"🔄 Converting input from float32 to float16 for CUDA")
+                    input_features = input_features.to(dtype=torch.float16)
+                    print(f"✅ Input dtype after conversion: {input_features.dtype}")
+            else:
+                # On CPU, try to match model dtype
+                try:
+                    model_dtype = next(self.model.parameters()).dtype
+                    if input_features.dtype != model_dtype:
+                        print(f"🔄 Converting input dtype from {input_features.dtype} to {model_dtype}")
+                        input_features = input_features.to(dtype=model_dtype)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not get model dtype: {e}")
+            
+            # Generate transcription with memory optimization
+            # Use autocast only for the generation step if needed
+            with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True,
+                    use_cache=False,  # Disable cache to save memory
                     language="en",  # Force English to avoid language detection issues
                     task="transcribe"  # Explicitly set task
                 )
@@ -578,10 +652,153 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     skip_special_tokens=True
                 )[0]
                 
+                # Post-process the transcription text
+                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
+                
                 return Transcription(text=transcription_text)
                 
         except Exception as e:
             raise ValueError(f"Failed to transcribe stream chunk: {str(e)}")
+    
+    def _merge_transcriptions_smart(self, chunk_metadata: List[dict], overlap_seconds: float) -> str:
+        """
+        Intelligently merge transcriptions by removing duplicates from overlap regions.
+        Uses conservative matching to avoid breaking sentences.
+        """
+        if not chunk_metadata:
+            return ""
+        
+        if len(chunk_metadata) == 1:
+            return self._clean_chunk_text(chunk_metadata[0]['text'])
+        
+        print(f"\n🔗 Smart merging {len(chunk_metadata)} transcriptions...")
+        
+        merged_parts = []
+        previous_text = ""
+        previous_words = []
+        
+        for i, chunk_info in enumerate(chunk_metadata):
+            # Clean chunk text first (remove filler words at boundaries)
+            current_text = self._clean_chunk_text(chunk_info['text'])
+            if not current_text.strip():
+                print(f"   Chunk {i+1}: Skipped (empty after cleaning)")
+                continue
+                
+            current_words = current_text.split()
+            
+            if i == 0:
+                # First chunk: add all text
+                merged_parts.append(current_text)
+                previous_text = current_text
+                previous_words = current_words
+                print(f"   Chunk {i+1}: Added {len(current_words)} words (first chunk)")
+                continue
+            
+            # Estimate overlap in words based on overlap duration
+            # Average speaking rate: ~150 words per minute = 2.5 words per second
+            estimated_overlap_words = int(overlap_seconds * 2.5)
+            
+            # Find the best overlap point by comparing end of previous with start of current
+            # Use more conservative matching - require higher similarity and exact word sequence match
+            overlap_found = False
+            best_overlap_length = 0
+            
+            # Try to find matching sequences - be more conservative
+            max_overlap = min(len(previous_words), len(current_words), estimated_overlap_words + 3)
+            for overlap_length in range(max_overlap, 2, -1):  # Require at least 3 words to match
+                # Check if last N words of previous match first N words of current
+                prev_suffix_words = previous_words[-overlap_length:]
+                curr_prefix_words = current_words[:overlap_length]
+                
+                # First check exact match (case-insensitive)
+                prev_suffix = " ".join(prev_suffix_words).lower()
+                curr_prefix = " ".join(curr_prefix_words).lower()
+                
+                if prev_suffix == curr_prefix:
+                    # Exact match - this is reliable
+                    best_overlap_length = overlap_length
+                    overlap_found = True
+                    break
+                
+                # Only use fuzzy matching for longer sequences and require very high similarity
+                if overlap_length >= 5:
+                    similarity = self._text_similarity(prev_suffix, curr_prefix)
+                    if similarity > 0.9:  # Increased threshold from 0.7 to 0.9
+                        best_overlap_length = overlap_length
+                        overlap_found = True
+                        break
+            
+            if overlap_found and best_overlap_length > 0:
+                # Remove overlapping words from current chunk
+                new_words = current_words[best_overlap_length:]
+                if new_words:
+                    new_text = " ".join(new_words)
+                    merged_parts.append(new_text)
+                    print(f"   Chunk {i+1}: Removed {best_overlap_length} overlapping words, added {len(new_words)} new words")
+                else:
+                    print(f"   Chunk {i+1}: Entirely overlapped, skipped")
+            else:
+                # No clear overlap found - just append (safer than guessing)
+                merged_parts.append(current_text)
+                print(f"   Chunk {i+1}: Added {len(current_words)} words (no clear overlap detected)")
+            
+            previous_text = current_text
+            previous_words = current_words
+        
+        merged_text = " ".join(merged_parts)
+        print(f"✅ Smart merge completed: {len(merged_text.split())} total words")
+        return merged_text
+    
+    def _clean_chunk_text(self, text: str) -> str:
+        """
+        Clean chunk text by removing common filler words at boundaries.
+        This helps reduce "Okay." and other artifacts at chunk starts.
+        """
+        if not text or not text.strip():
+            return text
+        
+        # Common filler words/phrases that Whisper adds at chunk boundaries
+        filler_patterns = [
+            r'^\s*okay\.?\s*',
+            r'^\s*ok\.?\s*',
+            r'^\s*um\s+',
+            r'^\s*uh\s+',
+            r'^\s*ah\s+',
+        ]
+        
+        cleaned = text.strip()
+        
+        # Remove filler words at the start
+        for pattern in filler_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        return cleaned.strip()
+    
+    
+    def _text_similarity(self, text1: str, text2: str) -> float:
+        """
+        Calculate similarity between two text strings using word overlap.
+        Returns a value between 0.0 and 1.0.
+        """
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        if not union:
+            return 0.0
+        
+        # Jaccard similarity
+        return len(intersection) / len(union)
     
     def reset_stream_state(self) -> None:
         """Reset the state for streaming transcription"""

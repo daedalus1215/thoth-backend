@@ -81,21 +81,33 @@ class StreamingTranscribeService:
                 
                 if torch.cuda.is_available():
                     input_features = input_features.to("cuda")
+                    # Convert input to match model dtype (float16 if model is in half precision)
+                    model_dtype = next(self.model.parameters()).dtype
+                    if input_features.dtype != model_dtype:
+                        input_features = input_features.to(dtype=model_dtype)
 
                 # Generate token ids with additional parameters for better quality
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=448,  # Limit output length
-                    num_beams=1,     # Use greedy decoding for speed
-                    do_sample=False, # Deterministic output
-                    early_stopping=True
-                )
+                # Use torch.no_grad() to reduce memory usage
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        input_features,
+                        max_length=448,  # Limit output length
+                        num_beams=1,     # Use greedy decoding for speed
+                        do_sample=False, # Deterministic output
+                        early_stopping=True,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 # Decode token ids to text
                 transcription = self.processor.batch_decode(
                     predicted_ids, 
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 # Filter the transcription
                 filtered_transcription = self._filter_transcription(transcription)
