@@ -2,6 +2,7 @@ from domain.entities.audio_file import AudioFile
 from domain.entities.transcription import Transcription
 from domain.ports.audio_processor import TranscriptionEngine
 from domain.value_objects.audio_config import ModelConfig
+from domain.services.transcription_post_processor import TranscriptionPostProcessor
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from accelerate import Accelerator
 import torch
@@ -84,8 +85,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             chunk_transcription = await self._transcribe_with_context(sliding_window, sample_rate)
             
             if chunk_transcription and chunk_transcription.text.strip():
-                word_count = len(chunk_transcription.text.strip().split())
-                transcriptions.append(chunk_transcription.text.strip())
+                # Post-process individual chunk before adding to list
+                cleaned_chunk_text = TranscriptionPostProcessor.post_process(chunk_transcription.text.strip())
+                word_count = len(cleaned_chunk_text.split())
+                transcriptions.append(cleaned_chunk_text)
                 chunk_details.append({
                     'index': chunk_index + 1,
                     'start': start/sample_rate,
@@ -141,6 +144,8 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
         # Combine all transcriptions
         if transcriptions:
             combined_text = " ".join(transcriptions)
+            # Post-process the final combined text to fix any remaining formatting issues
+            combined_text = TranscriptionPostProcessor.post_process(combined_text)
             words_per_minute = (total_words / total_audio_duration) * 60 if total_audio_duration > 0 else 0
             
             print(f"\n✅ FINAL RESULTS:")
@@ -215,6 +220,9 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Post-process the transcription text
+                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
                 
                 # Clean up GPU memory
                 if torch.cuda.is_available():
@@ -359,6 +367,9 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     skip_special_tokens=True
                 )[0]
                 
+                # Post-process the transcription text
+                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
+                
                 # Clean up GPU memory
                 if torch.cuda.is_available():
                     del input_features, predicted_ids
@@ -422,6 +433,9 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Post-process the transcription text
+                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
                 
                 # Clean up GPU memory
                 if torch.cuda.is_available():

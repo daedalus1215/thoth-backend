@@ -2,6 +2,7 @@ from domain.entities.audio_file import AudioFile
 from domain.entities.transcription import Transcription
 from domain.ports.audio_processor import TranscriptionEngine
 from domain.value_objects.audio_config import ModelConfig
+from domain.services.transcription_post_processor import TranscriptionPostProcessor
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from accelerate import Accelerator
 import torch
@@ -307,7 +308,7 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             if transcriptions:
                 combined_text = self._merge_transcriptions_smart(chunk_metadata, overlap_seconds)
                 # Post-process to clean up text
-                combined_text = self._post_process_transcription(combined_text)
+                combined_text = TranscriptionPostProcessor.post_process(combined_text)
                 total_words = len(combined_text.split())
                 total_chars = len(combined_text)
                 audio_duration_minutes = duration / 60
@@ -651,6 +652,9 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     skip_special_tokens=True
                 )[0]
                 
+                # Post-process the transcription text
+                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
+                
                 # Clean up GPU memory
                 if torch.cuda.is_available():
                     del input_features, predicted_ids
@@ -775,33 +779,6 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         
         return cleaned.strip()
     
-    def _post_process_transcription(self, text: str) -> str:
-        """
-        Post-process the final transcription to fix common issues:
-        - Remove duplicate periods
-        - Fix spacing around punctuation
-        - Remove excessive whitespace
-        """
-        if not text:
-            return text
-        
-        # Remove duplicate periods (e.g., "word.." -> "word.")
-        text = re.sub(r'\.{2,}', '.', text)
-        
-        # Fix spacing: ensure single space after periods, but not multiple spaces
-        text = re.sub(r'\.\s+', '. ', text)
-        text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces to single space
-        
-        # Remove periods that appear in the middle of words (artifacts)
-        # This catches cases like "word. word" where the period shouldn't be there
-        # But be careful - we don't want to remove legitimate periods
-        # Only remove if it's a single period surrounded by spaces with lowercase letters
-        text = re.sub(r'\s+\.\s+([a-z])', r' \1', text)  # Remove ". " before lowercase
-        
-        # Clean up any remaining artifacts
-        text = text.strip()
-        
-        return text
     
     def _text_similarity(self, text1: str, text2: str) -> float:
         """
