@@ -54,22 +54,34 @@ class AcceleratedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"Warning: Model on {self.model.device}, input on {input_features.device}")
                     input_features = input_features.to(self.model.device)
                 
+                # Convert input to match model dtype (float16 if model is in half precision)
+                model_dtype = next(self.model.parameters()).dtype
+                if input_features.dtype != model_dtype:
+                    input_features = input_features.to(dtype=model_dtype)
+                
                 # Generate transcription with optimized settings
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
-                    do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True  # Enable KV cache for faster generation
-                )
+                # Use torch.no_grad() to reduce memory usage during inference
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        input_features,
+                        max_length=self.model_config.max_length,
+                        num_beams=self.model_config.num_beams,
+                        do_sample=self.model_config.do_sample,
+                        early_stopping=self.model_config.early_stopping,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 # Decode to text
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return Transcription(text=transcription_text)
                 
@@ -98,22 +110,33 @@ class AcceleratedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"Warning: Model on {self.model.device}, input on {input_features.device}")
                     input_features = input_features.to(self.model.device)
                 
-                # Generate transcription
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
-                    do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
-                )
+                # Convert input to match model dtype (float16 if model is in half precision)
+                model_dtype = next(self.model.parameters()).dtype
+                if input_features.dtype != model_dtype:
+                    input_features = input_features.to(dtype=model_dtype)
+                
+                # Generate transcription with memory optimization
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        input_features,
+                        max_length=self.model_config.max_length,
+                        num_beams=self.model_config.num_beams,
+                        do_sample=self.model_config.do_sample,
+                        early_stopping=self.model_config.early_stopping,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 # Decode to text
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return Transcription(text=transcription_text)
                 

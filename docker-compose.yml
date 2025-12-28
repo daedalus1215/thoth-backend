@@ -20,6 +20,7 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=0
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
       # SSL configuration (set these in .env file or uncomment to use)
       # - SSL_KEYFILE=/app/ssl/server.key
       # - SSL_CERTFILE=/app/ssl/server.crt

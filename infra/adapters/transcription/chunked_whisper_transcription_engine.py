@@ -11,6 +11,7 @@ import io
 import re
 from typing import Optional, List
 import asyncio
+from infra.adapters.transcription.shared_model_manager import SharedModelManager
 
 
 class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
@@ -19,23 +20,10 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
     def __init__(self, model_config: ModelConfig, chunk_duration_seconds: float = 30.0):
         self.model_config = model_config
         self.chunk_duration_seconds = chunk_duration_seconds
-        self.accelerator = Accelerator()
         
-        # Load model and processor
-        self.processor = WhisperProcessor.from_pretrained(model_config.model_name)
-        self.model = WhisperForConditionalGeneration.from_pretrained(model_config.model_name)
-        
-        # Move model to accelerator device
-        self.model = self.model.to(self.accelerator.device)
-        
-        # Enable mixed precision if supported and on GPU
-        if torch.cuda.is_available() and self.accelerator.device.type == 'cuda':
-            if self.accelerator.mixed_precision == "fp16":
-                print("Using FP16 mixed precision for faster inference")
-            elif self.accelerator.mixed_precision == "bf16":
-                print("Using BF16 mixed precision for faster inference")
-        else:
-            print(f"Using CPU inference on device: {self.accelerator.device}")
+        # Use shared model manager to avoid loading duplicate models
+        self._model_manager = SharedModelManager()
+        self.model, self.processor, self.accelerator = self._model_manager.get_model(model_config)
         
         print(f"Chunked transcription engine initialized with {chunk_duration_seconds}s chunks")
     
@@ -498,54 +486,94 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
         try:
             print(f"🔄 Starting transcription of chunk: {len(audio_data)} samples at {sample_rate}Hz")
             
-            # Process with Whisper using accelerator
+            # Process with Whisper processor (outside autocast to control dtype)
             print("🔄 Processing audio with Whisper processor...")
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=sample_rate,
-                    return_tensors="pt"
-                ).input_features
-                print(f"✅ Processor completed. Input shape: {input_features.shape}")
-                
-                # Move to accelerator device
-                print(f"🔄 Moving to device: {self.accelerator.device}")
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=sample_rate,
+                return_tensors="pt"
+            ).input_features
+            print(f"✅ Processor completed. Input shape: {input_features.shape}")
+            
+            # Clear CUDA cache before moving tensors to avoid OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Move to accelerator device
+            print(f"🔄 Moving to device: {self.accelerator.device}")
+            try:
                 input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
-                    print(f"🔄 Moving input to model device: {self.model.device}")
+            except torch.cuda.OutOfMemoryError:
+                # If OOM, clear cache and try again
+                torch.cuda.empty_cache()
+                input_features = input_features.to(self.accelerator.device)
+            
+            # Ensure model and input are on the same device
+            if self.model.device != input_features.device:
+                print(f"🔄 Moving input to model device: {self.model.device}")
+                try:
                     input_features = input_features.to(self.model.device)
-                
-                # Generate transcription with optimized settings
-                print("🔄 Starting Whisper model generation (this is where it might hang)...")
-                print(f"   Model: {self.model_config.model_name}")
-                print(f"   Max length: {self.model_config.max_length}")
-                print(f"   Device: {self.model.device}")
-                print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
-                print(f"   Audio samples: {len(audio_data)}")
-                
+                except torch.cuda.OutOfMemoryError:
+                    # If OOM, clear cache and try again
+                    torch.cuda.empty_cache()
+                    input_features = input_features.to(self.model.device)
+            
+            # Convert input to match model dtype (float16 if model is in half precision)
+            # This MUST happen before generation to ensure correct dtype
+            # Always convert to float16 if on CUDA, regardless of model dtype check
+            if torch.cuda.is_available():
+                if input_features.dtype == torch.float32:
+                    print(f"🔄 Converting input from float32 to float16 for CUDA")
+                    input_features = input_features.to(dtype=torch.float16)
+                    print(f"✅ Input dtype after conversion: {input_features.dtype}")
+            else:
+                # On CPU, try to match model dtype
+                try:
+                    model_dtype = next(self.model.parameters()).dtype
+                    print(f"🔍 Model dtype: {model_dtype}, Input dtype: {input_features.dtype}")
+                    if input_features.dtype != model_dtype:
+                        print(f"🔄 Converting input dtype from {input_features.dtype} to {model_dtype}")
+                        input_features = input_features.to(dtype=model_dtype)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not get model dtype: {e}")
+            
+            # Generate transcription with optimized settings
+            print("🔄 Starting Whisper model generation (this is where it might hang)...")
+            print(f"   Model: {self.model_config.model_name}")
+            print(f"   Max length: {self.model_config.max_length}")
+            print(f"   Device: {self.model.device}")
+            print(f"   Input dtype: {input_features.dtype}")
+            print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
+            print(f"   Audio samples: {len(audio_data)}")
+            
+            # Use torch.no_grad() to reduce memory usage during inference
+            with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True,
+                    use_cache=False,  # Disable cache to save memory
                     language="en",  # Force English to avoid language detection issues
                     task="transcribe"  # Explicitly set task
                 )
-                print("✅ Model generation completed!")
-                
-                # Decode to text
-                print("🔄 Decoding transcription...")
-                transcription_text = self.processor.batch_decode(
-                    predicted_ids,
-                    skip_special_tokens=True
-                )[0]
-                print(f"✅ Transcription completed: '{transcription_text[:50]}...'")
-                
-                return Transcription(text=transcription_text)
+            print("✅ Model generation completed!")
+            
+            # Decode to text
+            print("🔄 Decoding transcription...")
+            transcription_text = self.processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True
+            )[0]
+            print(f"✅ Transcription completed: '{transcription_text[:50]}...'")
+            
+            # Clean up GPU memory
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
+            
+            return Transcription(text=transcription_text)
                 
         except Exception as e:
             print(f"❌ Error transcribing chunk: {str(e)}")
@@ -559,29 +587,60 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             # Convert bytes to numpy array
             audio_data = np.frombuffer(audio_chunk, dtype=np.float32)
             
-            # Process with Whisper using accelerator
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=16000,
-                    return_tensors="pt"
-                ).input_features
-                
-                # Move to accelerator device
+            # Process with Whisper processor (outside autocast to control dtype)
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=16000,
+                return_tensors="pt"
+            ).input_features
+            
+            # Clear CUDA cache before moving tensors to avoid OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Move to accelerator device
+            try:
                 input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                input_features = input_features.to(self.accelerator.device)
+            
+            # Ensure model and input are on the same device
+            if self.model.device != input_features.device:
+                try:
                     input_features = input_features.to(self.model.device)
-                
-                # Generate transcription
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    input_features = input_features.to(self.model.device)
+            
+            # Convert input to match model dtype (float16 if model is in half precision)
+            # This MUST happen before generation to ensure correct dtype
+            # Always convert to float16 if on CUDA, regardless of model dtype check
+            if torch.cuda.is_available():
+                if input_features.dtype == torch.float32:
+                    print(f"🔄 Converting input from float32 to float16 for CUDA")
+                    input_features = input_features.to(dtype=torch.float16)
+                    print(f"✅ Input dtype after conversion: {input_features.dtype}")
+            else:
+                # On CPU, try to match model dtype
+                try:
+                    model_dtype = next(self.model.parameters()).dtype
+                    if input_features.dtype != model_dtype:
+                        print(f"🔄 Converting input dtype from {input_features.dtype} to {model_dtype}")
+                        input_features = input_features.to(dtype=model_dtype)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not get model dtype: {e}")
+            
+            # Generate transcription with memory optimization
+            # Use autocast only for the generation step if needed
+            with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True,
+                    use_cache=False,  # Disable cache to save memory
                     language="en",  # Force English to avoid language detection issues
                     task="transcribe"  # Explicitly set task
                 )
@@ -591,6 +650,11 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return Transcription(text=transcription_text)
                 

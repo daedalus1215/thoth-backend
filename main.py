@@ -1,9 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import os
 
 # Load environment variables from .env file FIRST
 load_dotenv()
+
+# Set PyTorch CUDA memory allocation configuration to reduce fragmentation
+# This should be set before importing torch
+# Use PYTORCH_ALLOC_CONF (new) instead of PYTORCH_CUDA_ALLOC_CONF (deprecated)
+if "PYTORCH_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# Also set deprecated variable for backward compatibility if not already set
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from app.di.container import DependencyContainer
 from app.config.settings import config

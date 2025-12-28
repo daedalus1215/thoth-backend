@@ -42,20 +42,32 @@ class WhisperTranscriptionEngine(TranscriptionEngine):
             # Move input features to the same device as the model
             input_features = input_features.to(self.model.device)
             
-            # Generate transcription
-            predicted_ids = self.model.generate(
-                input_features,
-                max_length=self.model_config.max_length,
-                num_beams=self.model_config.num_beams,
-                do_sample=self.model_config.do_sample,
-                early_stopping=self.model_config.early_stopping
-            )
+            # Convert input to match model dtype (float16 if model is in half precision)
+            model_dtype = next(self.model.parameters()).dtype
+            if input_features.dtype != model_dtype:
+                input_features = input_features.to(dtype=model_dtype)
+            
+            # Generate transcription with memory optimization
+            with torch.no_grad():
+                predicted_ids = self.model.generate(
+                    input_features,
+                    max_length=self.model_config.max_length,
+                    num_beams=self.model_config.num_beams,
+                    do_sample=self.model_config.do_sample,
+                    early_stopping=self.model_config.early_stopping,
+                    use_cache=False  # Disable cache to save memory
+                )
             
             # Decode to text
             transcription_text = self.processor.batch_decode(
                 predicted_ids,
                 skip_special_tokens=True
             )[0]
+            
+            # Clean up GPU memory
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
             
             return Transcription(text=transcription_text)
             
@@ -78,20 +90,32 @@ class WhisperTranscriptionEngine(TranscriptionEngine):
             # Move input features to the same device as the model
             input_features = input_features.to(self.model.device)
             
-            # Generate transcription
-            predicted_ids = self.model.generate(
-                input_features,
-                max_length=self.model_config.max_length,
-                num_beams=self.model_config.num_beams,
-                do_sample=self.model_config.do_sample,
-                early_stopping=self.model_config.early_stopping
-            )
+            # Convert input to match model dtype (float16 if model is in half precision)
+            model_dtype = next(self.model.parameters()).dtype
+            if input_features.dtype != model_dtype:
+                input_features = input_features.to(dtype=model_dtype)
+            
+            # Generate transcription with memory optimization
+            with torch.no_grad():
+                predicted_ids = self.model.generate(
+                    input_features,
+                    max_length=self.model_config.max_length,
+                    num_beams=self.model_config.num_beams,
+                    do_sample=self.model_config.do_sample,
+                    early_stopping=self.model_config.early_stopping,
+                    use_cache=False  # Disable cache to save memory
+                )
             
             # Decode to text
             transcription_text = self.processor.batch_decode(
                 predicted_ids,
                 skip_special_tokens=True
             )[0]
+            
+            # Clean up GPU memory
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
             
             return Transcription(text=transcription_text)
             

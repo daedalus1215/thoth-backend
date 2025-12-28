@@ -62,20 +62,32 @@ class BatchTranscriptionEngine(TranscriptionEngine):
                 
                 input_features = input_features.to(self.accelerator.device)
                 
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
-                    do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
-                )
+                # Convert input to match model dtype (float16 if model is in half precision)
+                model_dtype = next(self.model.parameters()).dtype
+                if input_features.dtype != model_dtype:
+                    input_features = input_features.to(dtype=model_dtype)
+                
+                # Generate with memory optimization
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        input_features,
+                        max_length=self.model_config.max_length,
+                        num_beams=self.model_config.num_beams,
+                        do_sample=self.model_config.do_sample,
+                        early_stopping=self.model_config.early_stopping,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return Transcription(text=transcription_text)
                 
@@ -101,17 +113,23 @@ class BatchTranscriptionEngine(TranscriptionEngine):
             batch_input_features = torch.cat(batch_features, dim=0)
             batch_input_features = batch_input_features.to(self.accelerator.device)
             
+            # Convert input to match model dtype (float16 if model is in half precision)
+            model_dtype = next(self.model.parameters()).dtype
+            if batch_input_features.dtype != model_dtype:
+                batch_input_features = batch_input_features.to(dtype=model_dtype)
+            
             # Generate transcriptions for the entire batch
             with self.accelerator.autocast():
-                predicted_ids = self.model.generate(
-                    batch_input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
-                    do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
-                )
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        batch_input_features,
+                        max_length=self.model_config.max_length,
+                        num_beams=self.model_config.num_beams,
+                        do_sample=self.model_config.do_sample,
+                        early_stopping=self.model_config.early_stopping,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 # Decode all transcriptions
                 transcriptions_text = self.processor.batch_decode(
@@ -121,6 +139,11 @@ class BatchTranscriptionEngine(TranscriptionEngine):
                 
                 # Convert to Transcription objects
                 transcriptions = [Transcription(text=text) for text in transcriptions_text]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del batch_input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return transcriptions
                 
@@ -142,20 +165,32 @@ class BatchTranscriptionEngine(TranscriptionEngine):
                 
                 input_features = input_features.to(self.accelerator.device)
                 
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
-                    do_sample=self.model_config.do_sample,
-                    early_stopping=self.model_config.early_stopping,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=True
-                )
+                # Convert input to match model dtype (float16 if model is in half precision)
+                model_dtype = next(self.model.parameters()).dtype
+                if input_features.dtype != model_dtype:
+                    input_features = input_features.to(dtype=model_dtype)
+                
+                # Generate with memory optimization
+                with torch.no_grad():
+                    predicted_ids = self.model.generate(
+                        input_features,
+                        max_length=self.model_config.max_length,
+                        num_beams=self.model_config.num_beams,
+                        do_sample=self.model_config.do_sample,
+                        early_stopping=self.model_config.early_stopping,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False  # Disable cache to save memory
+                    )
                 
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    del input_features, predicted_ids
+                    torch.cuda.empty_cache()
                 
                 return Transcription(text=transcription_text)
                 
