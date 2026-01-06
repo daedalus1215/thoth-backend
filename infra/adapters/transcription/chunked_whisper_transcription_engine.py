@@ -639,16 +639,24 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             if streaming_beams != self.model_config.num_beams:
                 print(f"🎯 Using streaming beam search: {streaming_beams} beams (file uploads use {self.model_config.num_beams})")
             with torch.no_grad():
-                predicted_ids = self.model.generate(
-                    input_features,
-                    max_length=self.model_config.max_length,
-                    num_beams=streaming_beams,  # Use streaming-specific beam search
-                    do_sample=self.model_config.do_sample,
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=False,  # Disable cache to save memory
-                    language="en",  # Force English to avoid language detection issues
-                    task="transcribe"  # Explicitly set task
-                )
+                generate_kwargs = {
+                    "max_length": self.model_config.max_length,
+                    "num_beams": streaming_beams,  # Use streaming-specific beam search
+                    "do_sample": self.model_config.do_sample,
+                    "pad_token_id": self.processor.tokenizer.eos_token_id,
+                    "use_cache": False,  # Disable cache to save memory
+                    "language": "en",  # Force English to avoid language detection issues
+                    "task": "transcribe"  # Explicitly set task
+                }
+                
+                # Add repetition control if configured
+                if hasattr(self.model_config, 'repetition_penalty') and self.model_config.repetition_penalty > 1.0:
+                    generate_kwargs["repetition_penalty"] = self.model_config.repetition_penalty
+                
+                if hasattr(self.model_config, 'no_repeat_ngram_size') and self.model_config.no_repeat_ngram_size > 0:
+                    generate_kwargs["no_repeat_ngram_size"] = self.model_config.no_repeat_ngram_size
+                
+                predicted_ids = self.model.generate(input_features, **generate_kwargs)
                 
                 # Decode to text
                 transcription_text = self.processor.batch_decode(

@@ -55,6 +55,8 @@ class ModelConfig:
     streaming_num_beams: int = 2  # For streaming (balance between accuracy and latency)
     do_sample: bool = False
     early_stopping: bool = True
+    repetition_penalty: float = 1.0  # Penalty for repetition (1.0 = no penalty, >1.0 = reduce repetition)
+    no_repeat_ngram_size: int = 0  # Prevent repeating n-grams (0 = disabled)
 
 
 @dataclass
@@ -123,7 +125,9 @@ class Config:
             num_beams=int(os.getenv("WHISPER_NUM_BEAMS", "1")),  # File uploads
             streaming_num_beams=int(os.getenv("WHISPER_STREAMING_NUM_BEAMS", "2")),  # Streaming (2 = good balance)
             do_sample=os.getenv("WHISPER_DO_SAMPLE", "false").lower() == "true",
-            early_stopping=os.getenv("WHISPER_EARLY_STOPPING", "true").lower() == "true"
+            early_stopping=os.getenv("WHISPER_EARLY_STOPPING", "true").lower() == "true",
+            repetition_penalty=float(os.getenv("WHISPER_REPETITION_PENALTY", "1.0")),  # 1.0 = no penalty
+            no_repeat_ngram_size=int(os.getenv("WHISPER_NO_REPEAT_NGRAM_SIZE", "0"))  # 0 = disabled
         )
     
     def _load_audio_config(self) -> AudioConfig:
