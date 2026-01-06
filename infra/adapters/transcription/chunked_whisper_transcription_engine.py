@@ -633,12 +633,16 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
                     print(f"⚠️  Warning: Could not get model dtype: {e}")
             
             # Generate transcription with memory optimization
-            # Use autocast only for the generation step if needed
+            # Use streaming-specific beam search for better accuracy (configurable via WHISPER_STREAMING_NUM_BEAMS)
+            # Default is 2 beams - good balance between accuracy and latency
+            streaming_beams = getattr(self.model_config, 'streaming_num_beams', self.model_config.num_beams)
+            if streaming_beams != self.model_config.num_beams:
+                print(f"🎯 Using streaming beam search: {streaming_beams} beams (file uploads use {self.model_config.num_beams})")
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
                     max_length=self.model_config.max_length,
-                    num_beams=self.model_config.num_beams,
+                    num_beams=streaming_beams,  # Use streaming-specific beam search
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
                     use_cache=False,  # Disable cache to save memory

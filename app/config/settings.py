@@ -28,11 +28,21 @@ class CORSConfig:
                 "http://localhost:8080", 
                 "http://localhost:9000",
                 "http://localhost:9001",
+                "https://localhost:3000",
+                "https://localhost:8080",
+                "https://localhost:9000",
+                "https://localhost:9001",
                 "http://127.0.0.1:3000",
                 "http://127.0.0.1:8080",
                 "http://127.0.0.1:9000",
                 "https://127.0.0.1:9000",
                 "http://127.0.0.1:9001",
+                "https://127.0.0.1:9001",
+                # Add common IP addresses for remote access
+                "https://172.16.0.61:9000",
+                "https://172.16.0.61:9001",
+                "http://172.16.0.61:9000",
+                "http://172.16.0.61:9001",
             ]
 
 
@@ -41,7 +51,8 @@ class ModelConfig:
     """Model configuration"""
     model_name: str = "openai/whisper-large-v3"
     max_length: int = 448
-    num_beams: int = 1
+    num_beams: int = 1  # For file uploads (can use higher for accuracy)
+    streaming_num_beams: int = 2  # For streaming (balance between accuracy and latency)
     do_sample: bool = False
     early_stopping: bool = True
 
@@ -109,7 +120,8 @@ class Config:
         return ModelConfig(
             model_name=os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3"),
             max_length=int(os.getenv("WHISPER_MAX_LENGTH", "448")),
-            num_beams=int(os.getenv("WHISPER_NUM_BEAMS", "1")),
+            num_beams=int(os.getenv("WHISPER_NUM_BEAMS", "1")),  # File uploads
+            streaming_num_beams=int(os.getenv("WHISPER_STREAMING_NUM_BEAMS", "2")),  # Streaming (2 = good balance)
             do_sample=os.getenv("WHISPER_DO_SAMPLE", "false").lower() == "true",
             early_stopping=os.getenv("WHISPER_EARLY_STOPPING", "true").lower() == "true"
         )
