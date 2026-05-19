@@ -38,7 +38,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             
             # If audio is short enough, process normally
             if duration <= self.chunk_duration_seconds:
-                return await self._transcribe_single_chunk(audio_data, sample_rate)
+                result = await self._transcribe_single_chunk(audio_data, sample_rate)
+                if result:
+                    return result
+                return Transcription(text="")
             
             # For longer audio, use sequential sliding window approach
             return await self._transcribe_sequential(audio_data, sample_rate)
