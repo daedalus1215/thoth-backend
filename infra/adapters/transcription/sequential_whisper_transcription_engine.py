@@ -27,6 +27,34 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
         
         print(f"Sequential transcription engine initialized with {chunk_duration_seconds}s sliding window")
     
+    def _prepare_model_inputs(self, input_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Move mel features to the model device/dtype and build an attention mask."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        try:
+            input_features = input_features.to(self.accelerator.device)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            input_features = input_features.to(self.accelerator.device)
+        
+        if self.model.device != input_features.device:
+            try:
+                input_features = input_features.to(self.model.device)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                input_features = input_features.to(self.model.device)
+        
+        model_dtype = next(self.model.parameters()).dtype
+        if input_features.dtype != model_dtype:
+            input_features = input_features.to(dtype=model_dtype)
+        
+        attention_mask = torch.ones(
+            input_features.shape[0], input_features.shape[-1],
+            dtype=torch.long, device=input_features.device
+        )
+        return input_features, attention_mask
+    
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
         """Transcribe audio file to text using sequential Whisper processing with sliding window"""
         try:
@@ -38,7 +66,10 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             
             # If audio is short enough, process normally
             if duration <= self.chunk_duration_seconds:
-                return await self._transcribe_single_chunk(audio_data, sample_rate)
+                result = await self._transcribe_single_chunk(audio_data, sample_rate)
+                if result:
+                    return result
+                return Transcription(text="")
             
             # For longer audio, use sequential sliding window approach
             return await self._transcribe_sequential(audio_data, sample_rate)
@@ -176,36 +207,14 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                 return_tensors="pt"
             ).input_features
             
-            # Clear CUDA cache before moving tensors to avoid OOM
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            # Move to accelerator device
-            try:
-                input_features = input_features.to(self.accelerator.device)
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
-                input_features = input_features.to(self.accelerator.device)
-            
-            # Ensure model and input are on the same device
-            if self.model.device != input_features.device:
-                try:
-                    input_features = input_features.to(self.model.device)
-                except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
-                    input_features = input_features.to(self.model.device)
-            
-            # Convert input to match model dtype (float16 if model is in half precision)
-            # This MUST happen before generation to ensure correct dtype
-            model_dtype = next(self.model.parameters()).dtype
-            if input_features.dtype != model_dtype:
-                input_features = input_features.to(dtype=model_dtype)
+            input_features, attention_mask = self._prepare_model_inputs(input_features)
             
             # Generate transcription with optimized settings for sequential processing
             # Use torch.no_grad() to reduce memory usage during inference
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
+                    attention_mask=attention_mask,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
@@ -321,61 +330,39 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
     async def _transcribe_single_chunk(self, audio_data: np.ndarray, sample_rate: int) -> Optional[Transcription]:
         """Transcribe a single audio chunk (for short audio files)"""
         try:
-            # Process with Whisper using accelerator
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=sample_rate,
-                    return_tensors="pt"
-                ).input_features
-                
-                # Clear CUDA cache before moving tensors to avoid OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Move to accelerator device
-                try:
-                    input_features = input_features.to(self.accelerator.device)
-                except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
-                    input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
-                    try:
-                        input_features = input_features.to(self.model.device)
-                    except torch.cuda.OutOfMemoryError:
-                        torch.cuda.empty_cache()
-                        input_features = input_features.to(self.model.device)
-                
-                # Generate transcription with optimized settings
-                with torch.no_grad():
-                    predicted_ids = self.model.generate(
-                        input_features,
-                        max_length=self.model_config.max_length,
-                        num_beams=self.model_config.num_beams,
-                        do_sample=self.model_config.do_sample,
-                        pad_token_id=self.processor.tokenizer.eos_token_id,
-                        use_cache=False,  # Disable cache to save memory
-                        language="en",  # Force English to avoid language detection issues
-                        task="transcribe"  # Explicitly set task
-                    )
-                
-                # Decode to text
-                transcription_text = self.processor.batch_decode(
-                    predicted_ids,
-                    skip_special_tokens=True
-                )[0]
-                
-                # Post-process the transcription text
-                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
-                
-                # Clean up GPU memory
-                if torch.cuda.is_available():
-                    del input_features, predicted_ids
-                    torch.cuda.empty_cache()
-                
-                return Transcription(text=transcription_text)
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=sample_rate,
+                return_tensors="pt"
+            ).input_features
+            
+            input_features, attention_mask = self._prepare_model_inputs(input_features)
+            
+            with torch.no_grad():
+                predicted_ids = self.model.generate(
+                    input_features,
+                    attention_mask=attention_mask,
+                    max_length=self.model_config.max_length,
+                    num_beams=self.model_config.num_beams,
+                    do_sample=self.model_config.do_sample,
+                    pad_token_id=self.processor.tokenizer.eos_token_id,
+                    use_cache=False,  # Disable cache to save memory
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
+                )
+            
+            transcription_text = self.processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True
+            )[0]
+            
+            transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
+            
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
+            
+            return Transcription(text=transcription_text)
                 
         except Exception as e:
             print(f"Error transcribing single chunk: {str(e)}")
@@ -388,61 +375,39 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             # Convert bytes to numpy array
             audio_data = np.frombuffer(audio_chunk, dtype=np.float32)
             
-            # Process with Whisper using accelerator
-            with self.accelerator.autocast():
-                input_features = self.processor(
-                    audio_data,
-                    sampling_rate=16000,
-                    return_tensors="pt"
-                ).input_features
-                
-                # Clear CUDA cache before moving tensors to avoid OOM
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Move to accelerator device
-                try:
-                    input_features = input_features.to(self.accelerator.device)
-                except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
-                    input_features = input_features.to(self.accelerator.device)
-                
-                # Ensure model and input are on the same device
-                if self.model.device != input_features.device:
-                    try:
-                        input_features = input_features.to(self.model.device)
-                    except torch.cuda.OutOfMemoryError:
-                        torch.cuda.empty_cache()
-                        input_features = input_features.to(self.model.device)
-                
-                # Generate transcription with memory optimization
-                with torch.no_grad():
-                    predicted_ids = self.model.generate(
-                        input_features,
-                        max_length=self.model_config.max_length,
-                        num_beams=self.model_config.num_beams,
-                        do_sample=self.model_config.do_sample,
-                        pad_token_id=self.processor.tokenizer.eos_token_id,
-                        use_cache=False,  # Disable cache to save memory
-                        language="en",  # Force English to avoid language detection issues
-                        task="transcribe"  # Explicitly set task
-                    )
-                
-                # Decode to text
-                transcription_text = self.processor.batch_decode(
-                    predicted_ids,
-                    skip_special_tokens=True
-                )[0]
-                
-                # Post-process the transcription text
-                transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
-                
-                # Clean up GPU memory
-                if torch.cuda.is_available():
-                    del input_features, predicted_ids
-                    torch.cuda.empty_cache()
-                
-                return Transcription(text=transcription_text)
+            input_features = self.processor(
+                audio_data,
+                sampling_rate=16000,
+                return_tensors="pt"
+            ).input_features
+            
+            input_features, attention_mask = self._prepare_model_inputs(input_features)
+            
+            with torch.no_grad():
+                predicted_ids = self.model.generate(
+                    input_features,
+                    attention_mask=attention_mask,
+                    max_length=self.model_config.max_length,
+                    num_beams=self.model_config.num_beams,
+                    do_sample=self.model_config.do_sample,
+                    pad_token_id=self.processor.tokenizer.eos_token_id,
+                    use_cache=False,  # Disable cache to save memory
+                    language="en",  # Force English to avoid language detection issues
+                    task="transcribe"  # Explicitly set task
+                )
+            
+            transcription_text = self.processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True
+            )[0]
+            
+            transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
+            
+            if torch.cuda.is_available():
+                del input_features, predicted_ids
+                torch.cuda.empty_cache()
+            
+            return Transcription(text=transcription_text)
                 
         except Exception as e:
             raise ValueError(f"Failed to transcribe stream chunk: {str(e)}")

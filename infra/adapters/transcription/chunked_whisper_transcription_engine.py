@@ -547,10 +547,16 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             print(f"   Audio length: {len(audio_data)/sample_rate:.1f}s")
             print(f"   Audio samples: {len(audio_data)}")
             
+            attention_mask = torch.ones(
+                input_features.shape[0], input_features.shape[-1],
+                dtype=torch.long, device=input_features.device
+            )
+            
             # Use torch.no_grad() to reduce memory usage during inference
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
+                    attention_mask=attention_mask,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
@@ -638,8 +644,15 @@ class ChunkedWhisperTranscriptionEngine(TranscriptionEngine):
             streaming_beams = getattr(self.model_config, 'streaming_num_beams', self.model_config.num_beams)
             if streaming_beams != self.model_config.num_beams:
                 print(f"🎯 Using streaming beam search: {streaming_beams} beams (file uploads use {self.model_config.num_beams})")
+            
+            attention_mask = torch.ones(
+                input_features.shape[0], input_features.shape[-1],
+                dtype=torch.long, device=input_features.device
+            )
+            
             with torch.no_grad():
                 generate_kwargs = {
+                    "attention_mask": attention_mask,
                     "max_length": self.model_config.max_length,
                     "num_beams": streaming_beams,  # Use streaming-specific beam search
                     "do_sample": self.model_config.do_sample,
