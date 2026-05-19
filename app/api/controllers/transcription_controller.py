@@ -1,10 +1,17 @@
-from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+import asyncio
+from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect, Form
+from fastapi.responses import JSONResponse, PlainTextResponse
 from domain.entities.audio_file import AudioFile
+from domain.entities.transcription import Transcription
 from domain.value_objects.audio_config import AudioConfig
 from app.use_cases.transcribe_audio_use_case import TranscribeAudioUseCase
 from app.use_cases.transcribe_audio_use_case import StreamAudioUseCase
 from typing import Optional, List
+
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+_AUDIO_EXTENSIONS = frozenset({
+    "mp3", "wav", "m4a", "flac", "ogg", "opus", "webm", "mpeg", "mpga", "oga"
+})
 
 
 class TranscriptionController:
@@ -27,74 +34,159 @@ class TranscriptionController:
         self.router.post("/transcribe/")(self.transcribe_file)
         self.router.post("/upload")(self.upload_audio)
         self.router.post("/transcribe/batch")(self.transcribe_batch)
+        self.router.post("/v1/audio/transcriptions")(self.openai_transcribe)
         self.router.websocket("/stream-audio")(self.stream_audio)
         self.router.get("/health")(self.health_check)
         self.router.get("/performance")(self.get_performance_info)
+    
+    @staticmethod
+    def _openai_error_response(
+        message: str,
+        status_code: int,
+        error_type: str = "server_error",
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": {
+                    "message": message,
+                    "type": error_type,
+                    "code": None,
+                }
+            },
+        )
+    
+    @staticmethod
+    def _calculate_timeout_seconds(file_size: Optional[int]) -> float:
+        estimated_duration_minutes = (file_size or 0) / (32000 * 60)
+        timeout_minutes = max(5, estimated_duration_minutes * 2)
+        return min(timeout_minutes * 60, 1800)
+    
+    @staticmethod
+    def _has_audio_extension(filename: Optional[str]) -> bool:
+        if not filename or "." not in filename:
+            return False
+        return filename.rsplit(".", 1)[-1].lower() in _AUDIO_EXTENSIONS
+    
+    def _is_strict_audio_upload(self, file: UploadFile) -> bool:
+        return bool(file.content_type and file.content_type.startswith("audio/"))
+    
+    def _is_openai_audio_upload(self, file: UploadFile) -> bool:
+        if self._is_strict_audio_upload(file):
+            return True
+        if file.content_type in ("application/octet-stream", "video/mp4", "video/webm"):
+            return self._has_audio_extension(file.filename)
+        return self._has_audio_extension(file.filename)
+    
+    async def _run_file_transcription(self, file: UploadFile) -> Transcription:
+        if file.size and file.size > _MAX_UPLOAD_BYTES:
+            raise ValueError("File too large. Maximum size is 100MB.")
+        
+        audio_file = AudioFile.from_upload_file(file)
+        timeout_seconds = self._calculate_timeout_seconds(file.size or audio_file.size)
+        
+        print(f"⏱️  Setting timeout to {timeout_seconds / 60:.1f} minutes for {audio_file.size} byte file")
+        
+        return await asyncio.wait_for(
+            self.transcribe_audio_use_case.execute(audio_file, self.audio_config),
+            timeout=timeout_seconds,
+        )
     
     async def transcribe_file(self, file: UploadFile = File(...)):
         """Transcribe uploaded audio file with progress tracking"""
         try:
             print(f"📁 Received file upload: {file.filename} ({file.size} bytes)")
             
-            # Validate file size (industry standard: max 100MB)
-            if file.size and file.size > 100 * 1024 * 1024:
+            if file.size and file.size > _MAX_UPLOAD_BYTES:
                 return JSONResponse(
-                    content={"error": "File too large. Maximum size is 100MB."}, 
-                    status_code=413
+                    content={"error": "File too large. Maximum size is 100MB."},
+                    status_code=413,
                 )
             
-            # Validate file type
-            if not file.content_type or not file.content_type.startswith('audio/'):
+            if not self._is_strict_audio_upload(file):
                 return JSONResponse(
-                    content={"error": "Invalid file type. Please upload an audio file."}, 
-                    status_code=400
+                    content={"error": "Invalid file type. Please upload an audio file."},
+                    status_code=400,
                 )
             
-            print(f"✅ File validation passed. Starting transcription...")
-            audio_file = AudioFile.from_upload_file(file)
+            print("✅ File validation passed. Starting transcription...")
+            transcription = await self._run_file_transcription(file)
             
-            # Verify file was read completely
-            print(f"📊 File read verification:")
-            print(f"   Upload file size: {file.size} bytes")
-            print(f"   AudioFile size: {audio_file.size} bytes")
-            print(f"   Content length: {len(audio_file.content)} bytes")
-            
-            if file.size and audio_file.size != file.size:
-                print(f"⚠️  WARNING: File size mismatch! Upload={file.size}, Read={audio_file.size}")
-            else:
-                print(f"✅ File read completely")
-            
-            # Add timeout to prevent infinite hanging
-            import asyncio
-            
-            # Calculate timeout based on file size (more generous for large files)
-            estimated_duration_minutes = (file.size or 0) / (32000 * 60)  # Rough estimate: 32KB per minute
-            timeout_minutes = max(5, estimated_duration_minutes * 2)  # At least 5 minutes, or 2x estimated duration
-            timeout_seconds = min(timeout_minutes * 60, 1800)  # Cap at 30 minutes
-            
-            print(f"⏱️  Setting timeout to {timeout_seconds/60:.1f} minutes for {file.size} byte file")
-            
-            transcription = await asyncio.wait_for(
-                self.transcribe_audio_use_case.execute(audio_file, self.audio_config),
-                timeout=timeout_seconds
-            )
-            
-            print(f"✅ Transcription completed successfully")
+            print("✅ Transcription completed successfully")
             return JSONResponse(content={
                 "transcription": transcription.text,
                 "status": "success",
-                "filename": file.filename
+                "filename": file.filename,
             })
             
         except asyncio.TimeoutError:
-            print(f"❌ Transcription timed out after 5 minutes")
+            print("❌ Transcription timed out")
             return JSONResponse(
-                content={"error": "Transcription timed out. Please try with a shorter audio file."}, 
-                status_code=408
+                content={"error": "Transcription timed out. Please try with a shorter audio file."},
+                status_code=408,
             )
         except Exception as e:
             print(f"❌ Transcription failed: {str(e)}")
             return JSONResponse(content={"error": str(e)}, status_code=400)
+    
+    async def openai_transcribe(
+        self,
+        file: UploadFile = File(...),
+        model: Optional[str] = Form(default=None),
+        response_format: Optional[str] = Form(default="json"),
+        language: Optional[str] = Form(default=None),
+        temperature: Optional[float] = Form(default=None),
+    ):
+        """
+        OpenAI-compatible audio transcription endpoint for clients such as Hermes Agent.
+        """
+        del model, language, temperature  # accepted for API compatibility; engine config is internal
+        
+        try:
+            print(f"📁 OpenAI transcribe: {file.filename} ({file.size} bytes), format={response_format}")
+            
+            if file.size and file.size > _MAX_UPLOAD_BYTES:
+                return self._openai_error_response(
+                    "File too large. Maximum size is 100MB.",
+                    status_code=413,
+                    error_type="invalid_request_error",
+                )
+            
+            if not self._is_openai_audio_upload(file):
+                return self._openai_error_response(
+                    "Invalid file type. Please upload an audio file.",
+                    status_code=400,
+                    error_type="invalid_request_error",
+                )
+            
+            normalized_format = (response_format or "json").strip().lower()
+            if normalized_format not in ("json", "text"):
+                return self._openai_error_response(
+                    f"Unsupported response_format: {response_format}. Supported: json, text.",
+                    status_code=400,
+                    error_type="invalid_request_error",
+                )
+            
+            transcription = await self._run_file_transcription(file)
+            text = transcription.text
+            
+            if normalized_format == "text":
+                return PlainTextResponse(content=text, media_type="text/plain")
+            
+            return JSONResponse(content={"text": text})
+            
+        except asyncio.TimeoutError:
+            print("❌ OpenAI transcribe timed out")
+            return self._openai_error_response(
+                "Transcription timed out. Please try with a shorter audio file.",
+                status_code=408,
+            )
+        except Exception as e:
+            print(f"❌ OpenAI transcribe failed: {str(e)}")
+            return self._openai_error_response(
+                str(e),
+                status_code=500 if "not valid" in str(e).lower() else 400,
+            )
     
     async def upload_audio(self, file: UploadFile = File(...)):
         """Upload and transcribe audio file"""
@@ -103,24 +195,19 @@ class TranscriptionController:
             transcription = await self.transcribe_audio_use_case.execute(audio_file, self.audio_config)
             return {"transcription": transcription.text}
         except Exception as e:
-            return {"error": str(e)}, 400
+            return JSONResponse(content={"error": str(e)}, status_code=400)
     
     async def stream_audio(self, websocket: WebSocket):
         """WebSocket endpoint for streaming audio transcription"""
         await websocket.accept()
         
         try:
-            # Reset the stream state for new connection
             self.stream_audio_use_case.reset_stream()
             
             while True:
-                # Receive audio chunks from the WebSocket
                 audio_chunk = await websocket.receive_bytes()
-                
-                # Process the chunk
                 transcription = await self.stream_audio_use_case.execute(audio_chunk, self.audio_config)
                 
-                # If we have a transcription, send it back
                 if transcription:
                     await websocket.send_json({"transcription": transcription.text})
                     
@@ -137,13 +224,12 @@ class TranscriptionController:
         try:
             audio_files = [AudioFile.from_upload_file(file) for file in files]
             
-            # Process each file individually (could be optimized for true batch processing)
             transcriptions = []
             for audio_file in audio_files:
                 transcription = await self.transcribe_audio_use_case.execute(audio_file, self.audio_config)
                 transcriptions.append({
                     "filename": audio_file.filename,
-                    "transcription": transcription.text
+                    "transcription": transcription.text,
                 })
             
             return {"transcriptions": transcriptions, "count": len(transcriptions)}
@@ -153,7 +239,6 @@ class TranscriptionController:
     async def get_performance_info(self):
         """Get performance information about the transcription engine"""
         try:
-            # Get performance stats if available
             if hasattr(self.transcribe_audio_use_case.transcription_domain_service.transcription_engine, 'get_device_info'):
                 device_info = self.transcribe_audio_use_case.transcription_domain_service.transcription_engine.get_device_info()
             elif hasattr(self.transcribe_audio_use_case.transcription_domain_service.transcription_engine, 'get_performance_stats'):
@@ -166,8 +251,8 @@ class TranscriptionController:
                 "performance": device_info,
                 "audio_config": {
                     "sample_rate": self.audio_config.sample_rate,
-                    "buffer_duration": self.audio_config.buffer_duration_seconds
-                }
+                    "buffer_duration": self.audio_config.buffer_duration_seconds,
+                },
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
