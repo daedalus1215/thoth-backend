@@ -204,11 +204,17 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             if input_features.dtype != model_dtype:
                 input_features = input_features.to(dtype=model_dtype)
             
+            attention_mask = torch.ones(
+                input_features.shape[0], input_features.shape[-1],
+                dtype=torch.long, device=input_features.device
+            )
+            
             # Generate transcription with optimized settings for sequential processing
             # Use torch.no_grad() to reduce memory usage during inference
             with torch.no_grad():
                 predicted_ids = self.model.generate(
                     input_features,
+                    attention_mask=attention_mask,
                     max_length=self.model_config.max_length,
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
@@ -351,10 +357,16 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                         torch.cuda.empty_cache()
                         input_features = input_features.to(self.model.device)
                 
+                attention_mask = torch.ones(
+                    input_features.shape[0], input_features.shape[-1],
+                    dtype=torch.long, device=input_features.device
+                )
+                
                 # Generate transcription with optimized settings
                 with torch.no_grad():
                     predicted_ids = self.model.generate(
                         input_features,
+                        attention_mask=attention_mask,
                         max_length=self.model_config.max_length,
                         num_beams=self.model_config.num_beams,
                         do_sample=self.model_config.do_sample,
@@ -418,10 +430,16 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                         torch.cuda.empty_cache()
                         input_features = input_features.to(self.model.device)
                 
+                attention_mask = torch.ones(
+                    input_features.shape[0], input_features.shape[-1],
+                    dtype=torch.long, device=input_features.device
+                )
+                
                 # Generate transcription with memory optimization
                 with torch.no_grad():
                     predicted_ids = self.model.generate(
                         input_features,
+                        attention_mask=attention_mask,
                         max_length=self.model_config.max_length,
                         num_beams=self.model_config.num_beams,
                         do_sample=self.model_config.do_sample,
