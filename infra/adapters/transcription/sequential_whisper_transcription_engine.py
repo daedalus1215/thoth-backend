@@ -27,32 +27,29 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
         
         print(f"Sequential transcription engine initialized with {chunk_duration_seconds}s sliding window")
     
-    def _prepare_model_inputs(self, input_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Move mel features to the model device/dtype and build an attention mask."""
+    def _prepare_model_inputs(self, input_features: torch.Tensor, attention_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Move mel features and processor-provided attention mask to the model device/dtype."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
         try:
             input_features = input_features.to(self.accelerator.device)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             input_features = input_features.to(self.accelerator.device)
-        
+
         if self.model.device != input_features.device:
             try:
                 input_features = input_features.to(self.model.device)
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 input_features = input_features.to(self.model.device)
-        
+
         model_dtype = next(self.model.parameters()).dtype
         if input_features.dtype != model_dtype:
             input_features = input_features.to(dtype=model_dtype)
-        
-        attention_mask = torch.ones(
-            input_features.shape[0], input_features.shape[-1],
-            dtype=torch.long, device=input_features.device
-        )
+
+        attention_mask = attention_mask.to(device=input_features.device, dtype=torch.long)
         return input_features, attention_mask
     
     async def transcribe_audio(self, audio_file: AudioFile) -> Transcription:
@@ -201,13 +198,15 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             current_chunk = sliding_window[-1]
             
             # Process with Whisper processor (outside autocast to control dtype)
-            input_features = self.processor(
+            processor_out = self.processor(
                 current_chunk,
                 sampling_rate=sample_rate,
-                return_tensors="pt"
-            ).input_features
-            
-            input_features, attention_mask = self._prepare_model_inputs(input_features)
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            input_features, attention_mask = self._prepare_model_inputs(
+                processor_out.input_features, processor_out.attention_mask
+            )
             
             # Generate transcription with optimized settings for sequential processing
             # Use torch.no_grad() to reduce memory usage during inference
@@ -330,13 +329,15 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
     async def _transcribe_single_chunk(self, audio_data: np.ndarray, sample_rate: int) -> Optional[Transcription]:
         """Transcribe a single audio chunk (for short audio files)"""
         try:
-            input_features = self.processor(
+            processor_out = self.processor(
                 audio_data,
                 sampling_rate=sample_rate,
-                return_tensors="pt"
-            ).input_features
-            
-            input_features, attention_mask = self._prepare_model_inputs(input_features)
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            input_features, attention_mask = self._prepare_model_inputs(
+                processor_out.input_features, processor_out.attention_mask
+            )
             
             with torch.no_grad():
                 predicted_ids = self.model.generate(
@@ -375,13 +376,15 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
             # Convert bytes to numpy array
             audio_data = np.frombuffer(audio_chunk, dtype=np.float32)
             
-            input_features = self.processor(
+            processor_out = self.processor(
                 audio_data,
                 sampling_rate=16000,
-                return_tensors="pt"
-            ).input_features
-            
-            input_features, attention_mask = self._prepare_model_inputs(input_features)
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            input_features, attention_mask = self._prepare_model_inputs(
+                processor_out.input_features, processor_out.attention_mask
+            )
             
             with torch.no_grad():
                 predicted_ids = self.model.generate(
