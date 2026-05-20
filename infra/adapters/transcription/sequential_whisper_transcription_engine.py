@@ -221,8 +221,6 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     use_cache=False,
                     language="en",
                     task="transcribe",
-                    no_speech_threshold=0.6,
-                    logprob_threshold=-1.0,
                     compression_ratio_threshold=2.4,
                 )
 
@@ -231,17 +229,17 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     predicted_ids,
                     skip_special_tokens=True
                 )[0]
-                
+
                 # Post-process the transcription text
                 transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
-                
+
                 # Clean up GPU memory
                 if torch.cuda.is_available():
                     del input_features, predicted_ids
                     torch.cuda.empty_cache()
-                
+
                 return Transcription(text=transcription_text)
-                
+
         except Exception as e:
             print(f"Error transcribing sequential chunk: {str(e)}")
             return None
