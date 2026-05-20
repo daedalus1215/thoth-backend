@@ -218,11 +218,14 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=False,  # Disable cache to save memory
-                    language="en",  # Force English to avoid language detection issues
-                    task="transcribe"  # Explicitly set task
+                    use_cache=False,
+                    language="en",
+                    task="transcribe",
+                    no_speech_threshold=0.6,
+                    logprob_threshold=-1.0,
+                    compression_ratio_threshold=2.4,
                 )
-                
+
                 # Decode to text
                 transcription_text = self.processor.batch_decode(
                     predicted_ids,
@@ -347,24 +350,27 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=False,  # Disable cache to save memory
-                    language="en",  # Force English to avoid language detection issues
-                    task="transcribe"  # Explicitly set task
+                    use_cache=False,
+                    language="en",
+                    task="transcribe",
+                    no_speech_threshold=0.6,
+                    logprob_threshold=-1.0,
+                    compression_ratio_threshold=2.4,
                 )
-            
+
             transcription_text = self.processor.batch_decode(
                 predicted_ids,
                 skip_special_tokens=True
             )[0]
-            
+
             transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
-            
+
             if torch.cuda.is_available():
                 del input_features, predicted_ids
                 torch.cuda.empty_cache()
-            
+
             return Transcription(text=transcription_text)
-                
+
         except Exception as e:
             print(f"Error transcribing single chunk: {str(e)}")
             return None
@@ -394,24 +400,27 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     num_beams=self.model_config.num_beams,
                     do_sample=self.model_config.do_sample,
                     pad_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=False,  # Disable cache to save memory
-                    language="en",  # Force English to avoid language detection issues
-                    task="transcribe"  # Explicitly set task
+                    use_cache=False,
+                    language="en",
+                    task="transcribe",
+                    no_speech_threshold=0.6,
+                    logprob_threshold=-1.0,
+                    compression_ratio_threshold=2.4,
                 )
-            
+
             transcription_text = self.processor.batch_decode(
                 predicted_ids,
                 skip_special_tokens=True
             )[0]
-            
+
             transcription_text = TranscriptionPostProcessor.post_process(transcription_text)
-            
+
             if torch.cuda.is_available():
                 del input_features, predicted_ids
                 torch.cuda.empty_cache()
-            
+
             return Transcription(text=transcription_text)
-                
+
         except Exception as e:
             raise ValueError(f"Failed to transcribe stream chunk: {str(e)}")
     
