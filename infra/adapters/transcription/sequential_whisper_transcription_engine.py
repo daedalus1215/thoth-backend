@@ -351,8 +351,6 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     use_cache=False,
                     language="en",
                     task="transcribe",
-                    no_speech_threshold=0.6,
-                    logprob_threshold=-1.0,
                     compression_ratio_threshold=2.4,
                 )
 
@@ -401,8 +399,6 @@ class SequentialWhisperTranscriptionEngine(TranscriptionEngine):
                     use_cache=False,
                     language="en",
                     task="transcribe",
-                    no_speech_threshold=0.6,
-                    logprob_threshold=-1.0,
                     compression_ratio_threshold=2.4,
                 )
 
