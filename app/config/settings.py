@@ -47,6 +47,28 @@ class CORSConfig:
 
 
 @dataclass
+class StreamConfig:
+    """
+    Access control for the /stream-audio WebSocket.
+
+    Note that CORS does NOT apply here: Starlette's CORSMiddleware does not run on
+    WebSocket handshakes, so CORS_ORIGINS has never protected this endpoint.
+
+    See specs/stream-audio-hardening.md.
+    """
+    # Origin allowlist. Empty (the default) rejects every handshake carrying an
+    # Origin header — which means every browser, since browsers always send one
+    # and server-side clients do not.
+    allowed_origins: List[str] = None
+    # Shared secret expected in the x-thoth-token header. Empty disables the check.
+    token: str = ""
+
+    def __post_init__(self):
+        if self.allowed_origins is None:
+            self.allowed_origins = []
+
+
+@dataclass
 class ModelConfig:
     """Model configuration"""
     model_name: str = "openai/whisper-large-v3"
@@ -93,6 +115,7 @@ class Config:
     def __init__(self):
         self.server = self._load_server_config()
         self.cors = self._load_cors_config()
+        self.stream = self._load_stream_config()
         self.model = self._load_model_config()
         self.audio = self._load_audio_config()
         self.transcription_engine = self._load_transcription_engine_config()
@@ -117,6 +140,15 @@ class Config:
             origins = None
         return CORSConfig(origins=origins)
     
+    def _load_stream_config(self) -> StreamConfig:
+        """Load /stream-audio access control from environment variables"""
+        origins_str = os.getenv("STREAM_ALLOWED_ORIGINS", "")
+        origins = [origin.strip() for origin in origins_str.split(",") if origin.strip()]
+        return StreamConfig(
+            allowed_origins=origins,
+            token=os.getenv("STREAM_TOKEN", "").strip(),
+        )
+
     def _load_model_config(self) -> ModelConfig:
         """Load model configuration from environment variables"""
         return ModelConfig(

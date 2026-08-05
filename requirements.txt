@@ -72,3 +72,6 @@ uvicorn==0.38.0
 uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
+# Testing. The /stream-audio guard tests in tests/ need no torch/CUDA:
+#   pytest tests/
+pytest==8.3.4

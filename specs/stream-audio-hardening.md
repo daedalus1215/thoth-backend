@@ -195,7 +195,7 @@ over §3 plus §7.
 This is the primary control. §3 and §4 are what stands when this is misconfigured.
 
 - **Bind to the private interface.** `HOST=0.0.0.0` in `env.example` binds everywhere. Set
-  `HOST=172.16.0.49` (or the container's private address) so thoth is not listening on anything
+  `HOST=x.x.x.61` (or the container's private address) so thoth is not listening on anything
   publicly routable.
 - **Firewall `:8443` to the Chronus backend host only.** Ingress allowlist of exactly one source
   address. This is the step that makes the direct browser path impossible rather than merely
@@ -204,7 +204,7 @@ This is the primary control. §3 and §4 are what stands when this is misconfigu
   `rejectUnauthorized: false`. If the cert is regenerated, redistribute the PEM to the Chronus host
   or the gateway starts failing with `1011`.
 - If thoth runs under `docker-compose.yml`, publish the port to the private interface only
-  (`172.16.0.49:8443:8443`), not `8443:8443` — the latter bypasses host firewall rules on many
+  (`x.x.x.61:8443:8443`), not `8443:8443` — the latter bypasses host firewall rules on many
   Docker setups, which is a common and quiet way to undo this whole section.
 
 ## 8. Documentation changes
@@ -238,13 +238,13 @@ Manual:
 
 ```bash
 # must be rejected — browsers always send Origin
-wscat -c "wss://172.16.0.49:8443/stream-audio" -H "Origin: https://chronus.cc-an.com"
+wscat -c "wss://x.x.x.61:8443/stream-audio" -H "Origin: https://chronus.cc-an.com"
 
 # must be accepted — no Origin, like the Chronus gateway
-wscat -c "wss://172.16.0.49:8443/stream-audio"
+wscat -c "wss://x.x.x.61:8443/stream-audio"
 
 # from a client machine, after §7 — must fail to connect at all, not merely be rejected
-wscat -c "wss://172.16.0.49:8443/stream-audio"
+wscat -c "wss://x.x.x.61:8443/stream-audio"
 ```
 
 The last one is the acceptance test for the whole effort. "Rejected" means the code works.
