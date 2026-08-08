@@ -186,6 +186,31 @@ The service uses **two separate transcription engines**:
 - **Chunk duration**: 3 seconds
 - **Optimization**: **Latency** for real-time transcription
 - **GPU**: CUDA when available
+- **Concurrency**: **one connection at a time.** A second concurrent connection is
+  rejected with close code `1013`.
+
+> #### ⚠️ `/stream-audio` serves a single session per process
+>
+> The audio buffer (`InMemoryAudioBuffer`) and the streaming domain service are
+> constructed once in `app/di/container.py` and shared by every WebSocket
+> connection. Two concurrent streams would interleave audio from different
+> speakers into one Whisper window and return **corrupt** transcriptions to both —
+> silently. The endpoint therefore rejects a second concurrent connection rather
+> than accepting it.
+>
+> See `specs/stream-audio-hardening.md` §4 for the guard and §5 for the per-connection
+> fix, which is designed but deliberately not implemented.
+
+> #### 🔒 `/stream-audio` is not for browsers
+>
+> This service is meant to sit on a private network, reachable only from the
+> Chronus backend, which proxies clients at `/api/notes/transcribe-audio`. The
+> endpoint rejects any handshake carrying an `Origin` header (close code `4403`) —
+> browsers always send one, server-side clients do not.
+>
+> **`CORS_ORIGINS` does not protect this endpoint.** Starlette's `CORSMiddleware`
+> does not run on WebSocket handshakes. Use `STREAM_ALLOWED_ORIGINS`, and firewall
+> the port. See `specs/stream-audio-hardening.md`.
 
 ### File uploads (`/transcribe/`, `/upload`, `/transcribe/batch`)
 

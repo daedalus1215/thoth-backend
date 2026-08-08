@@ -5,7 +5,13 @@ services:
     image: nvidia/cuda:12.4.1-cudnn8-devel-ubuntu22.04
     runtime: nvidia
     ports:
-      - "8000:8000"
+      # Publish to the PRIVATE interface only. Set BIND_ADDR to this host's LAN
+      # address in a .env beside this file; the loopback default is deliberate, so
+      # an unset value fails closed rather than exposing the service. A bare
+      # "8000:8000" binds 0.0.0.0 and bypasses host firewall rules on most Docker
+      # setups, which quietly undoes the network isolation this service depends on.
+      # See specs/stream-audio-hardening.md §7.
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
     volumes:
       # Mount SSL certificates if they exist (optional)
       - ./ssl:/app/ssl:ro  # Mount SSL directory as read-only

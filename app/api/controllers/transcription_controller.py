@@ -6,6 +6,7 @@ from domain.entities.transcription import Transcription
 from domain.value_objects.audio_config import AudioConfig
 from app.use_cases.transcribe_audio_use_case import TranscribeAudioUseCase
 from app.use_cases.transcribe_audio_use_case import StreamAudioUseCase
+from app.config.settings import config
 from typing import Optional, List
 
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
@@ -26,6 +27,8 @@ class TranscriptionController:
         self.transcribe_audio_use_case = transcribe_audio_use_case
         self.stream_audio_use_case = stream_audio_use_case
         self.audio_config = audio_config
+        # Guards the single shared streaming buffer — see stream_audio().
+        self._stream_in_use = False
         self.router = APIRouter()
         self._setup_routes()
     
@@ -197,26 +200,82 @@ class TranscriptionController:
         except Exception as e:
             return JSONResponse(content={"error": str(e)}, status_code=400)
     
+    def _reject_handshake_reason(self, websocket: WebSocket) -> Optional[tuple[int, str]]:
+        """
+        Decide whether a /stream-audio handshake may proceed.
+        Returns (close_code, reason) to reject, or None to accept.
+
+        See specs/stream-audio-hardening.md §3 and §6.
+        """
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in config.stream.allowed_origins:
+            # Browsers always send Origin on a WebSocket handshake and cannot
+            # suppress it; server-side clients (Node `ws`, python `websockets`)
+            # never send it unless asked. A present Origin therefore means a
+            # browser is connecting directly, which this service must not serve —
+            # clients reach transcription through the Chronus backend gateway.
+            return (4403, "Direct client connections are not permitted")
+
+        expected_token = config.stream.token
+        if expected_token and websocket.headers.get("x-thoth-token") != expected_token:
+            return (4401, "Unauthorized")
+
+        return None
+
     async def stream_audio(self, websocket: WebSocket):
-        """WebSocket endpoint for streaming audio transcription"""
-        await websocket.accept()
-        
+        """
+        WebSocket endpoint for streaming audio transcription.
+
+        Serves ONE connection at a time. The audio buffer and streaming engine are
+        process-wide singletons built in app/di/container.py, so concurrent streams
+        would interleave audio from different speakers into a single Whisper window
+        and silently produce corrupt transcriptions for everyone. A second caller is
+        rejected with 1013 rather than allowed to corrupt the first.
+
+        See specs/stream-audio-hardening.md §4 (guard) and §5 (the real fix, deferred).
+        """
+        rejection = self._reject_handshake_reason(websocket)
+        if rejection is not None:
+            close_code, reason = rejection
+            print(
+                f"🚫 Rejected /stream-audio handshake from "
+                f"{websocket.client.host if websocket.client else 'unknown'} "
+                f"(origin={websocket.headers.get('origin')!r}): {reason}"
+            )
+            await websocket.close(code=close_code, reason=reason)
+            return
+
+        if self._stream_in_use:
+            print("🚫 Rejected /stream-audio handshake: stream already in use")
+            await websocket.close(code=1013, reason="Transcription stream busy")
+            return
+
+        # Safe without a lock: uvicorn runs a single event loop and there is no
+        # await between the check above and this assignment.
+        self._stream_in_use = True
+
         try:
-            self.stream_audio_use_case.reset_stream()
-            
+            await websocket.accept()
+
+            # No reset_stream() here. The `finally` below already guarantees a clean
+            # buffer for the next connection, and resetting on connect is precisely
+            # what made a second connection destructive to the first.
             while True:
                 audio_chunk = await websocket.receive_bytes()
                 transcription = await self.stream_audio_use_case.execute(audio_chunk, self.audio_config)
-                
+
                 if transcription:
                     await websocket.send_json({"transcription": transcription.text})
-                    
+
         except WebSocketDisconnect:
             print("WebSocket disconnected")
         except Exception as e:
             print(f"Error in WebSocket: {str(e)}")
             await websocket.close()
         finally:
+            # Must always run. A leaked flag makes the service permanently refuse
+            # connections until restart — a worse failure than the one being fixed.
+            self._stream_in_use = False
             self.stream_audio_use_case.reset_stream()
     
     async def transcribe_batch(self, files: List[UploadFile] = File(...)):

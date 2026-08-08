@@ -55,6 +55,25 @@ Contains adapters that implement the ports defined in the domain layer.
   - `InMemoryTranscriptionRepository`: In-memory persistence
   - `ConsoleNotificationService`: Console-based notifications
 
+## Known constraint: streaming state is process-wide
+
+`DependencyContainer.configure()` builds **one** `InMemoryAudioBuffer` and **one**
+`ChunkedWhisperTranscriptionEngine` at boot and wires them through a single
+`StreamingTranscriptionDomainService` → `StreamAudioUseCaseImpl` → controller.
+
+That state is shared by every `/stream-audio` WebSocket connection, so the endpoint
+can only serve one session at a time. `TranscriptionController.stream_audio` enforces
+this with a `_stream_in_use` guard that rejects a second concurrent connection with
+close code `1013`.
+
+The per-connection fix is to expose a session **factory** from the container rather
+than a singleton instance — the buffer must be per-session, the Whisper engine can
+stay shared. It is designed in `specs/stream-audio-hardening.md` §5 and intentionally
+not implemented, because GPU contention then becomes the binding limit and needs a
+semaphore sized to available VRAM.
+
+Do not remove the `_stream_in_use` guard without doing that work first.
+
 ## Key Benefits
 
 1. **Separation of Concerns**: Each layer has a clear responsibility
