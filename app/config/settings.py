@@ -38,11 +38,10 @@ class CORSConfig:
                 "https://127.0.0.1:9000",
                 "http://127.0.0.1:9001",
                 "https://127.0.0.1:9001",
-                # Add common IP addresses for remote access
-                "https://172.16.0.61:9000",
-                "https://172.16.0.61:9001",
-                "http://172.16.0.61:9000",
-                "http://172.16.0.61:9001",
+                # Loopback only by design. Deployment addresses belong in the
+                # CORS_ORIGINS environment variable, never in this file — a
+                # hardcoded LAN address here is both a leak and a value that
+                # silently goes stale when a host moves.
             ]
 
 
