@@ -47,7 +47,7 @@ class SharedModelManager:
             target_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             self._model = WhisperForConditionalGeneration.from_pretrained(
                 model_config.model_name,
-                torch_dtype=target_dtype
+                dtype=target_dtype
             )
             
             # Move model to accelerator device

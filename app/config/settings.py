@@ -70,7 +70,7 @@ class StreamConfig:
 @dataclass
 class ModelConfig:
     """Model configuration"""
-    model_name: str = "openai/whisper-large-v3"
+    model_name: str = "openai/whisper-large-v3-turbo"
     max_length: int = 448
     num_beams: int = 1  # For file uploads (can use higher for accuracy)
     streaming_num_beams: int = 2  # For streaming (balance between accuracy and latency)
@@ -151,7 +151,7 @@ class Config:
     def _load_model_config(self) -> ModelConfig:
         """Load model configuration from environment variables"""
         return ModelConfig(
-            model_name=os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3"),
+            model_name=os.getenv("WHISPER_MODEL_NAME", "openai/whisper-large-v3-turbo"),
             max_length=int(os.getenv("WHISPER_MAX_LENGTH", "448")),
             num_beams=int(os.getenv("WHISPER_NUM_BEAMS", "1")),  # File uploads
             streaming_num_beams=int(os.getenv("WHISPER_STREAMING_NUM_BEAMS", "2")),  # Streaming (2 = good balance)
